@@ -69,8 +69,7 @@ let program =
 let program =
   Module (ref (
     LetFun (1, [2], 3, ref (
-      LetFun (4, [5], 6, ref (
-        Jmp (6, [5])), ref (
+      LetRec ([4, [5], 6, ref (Jmp (6, [5]))], ref (
         LetCont (7, [8], ref (
           Jmp (3, [8])), ref (
           App (4, [2], 7)))))), ref (
@@ -78,6 +77,12 @@ let program =
 
 let () =
   print_endline "Original";
+  dump program;
+  print_endline "";
+  print_endline "";
+
+  print_endline "Fixrec";
+  PassFixrec.transform program;
   dump program;
   print_endline "";
   print_endline "";
