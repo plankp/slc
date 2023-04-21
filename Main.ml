@@ -46,6 +46,17 @@ let program =
       ref (Export ["inf2", 1]))))
 *)
 
+(*
+let program =
+  Module (ref
+    (LetFun (1, [4; 5], 2, ref (
+      LetRec (
+        [ (3, [6; 7], 9, ref (App (3, [7; 6], 9)))
+        ], ref (App (3, [5; 4], 2)))),
+      ref (Export ["inf3", 1]))))
+*)
+
+(*
 let program =
   Module (ref
     (LetRec (
@@ -53,9 +64,26 @@ let program =
           LetCont (11, [4], ref (Jmp (10, [4])), ref (
             App (1, [2; 3], 11)))))
       ], ref (Export ["bad", 1]))))
+*)
+
+let program =
+  Module (ref (
+    LetFun (1, [2], 3, ref (
+      LetFun (4, [5], 6, ref (
+        Jmp (6, [5])), ref (
+        LetCont (7, [8], ref (
+          Jmp (3, [8])), ref (
+          App (4, [2], 7)))))), ref (
+      Export ["id", 1]))))
 
 let () =
   print_endline "Original";
+  dump program;
+  print_endline "";
+  print_endline "";
+
+  print_endline "Contification";
+  PassContify.transform program;
   dump program;
   print_endline "";
   print_endline "";
