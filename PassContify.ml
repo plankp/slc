@@ -1,83 +1,84 @@
 open Ast
 
-let rec find_insert_point candidate r =
-  let union_here t1 t2 =
-    match t1, t2 with
-      | Some (p, Some (k1, _)), Some (q, Some (k2, _)) when k1 = k2 ->
-        Some (List.rev_append p q, Some (k1, r))
-      | Some (_, None), v | v, Some (_, None) -> v
-      | _ -> None in
+module M = Map.Make (Int)
 
-  match !r with
-    | LetCont (_, _, body, next)
-    | LetFun (_, _, _, body, next) ->
-      let l = find_insert_point candidate body in
-      let r = find_insert_point candidate next in
-      union_here l r
+let merge r s1 s2 =
+  M.union (fun _ a b ->
+    match a, b with
+      | Some (k1, _, t1), Some (k2, _, t2) when k1 = k2 ->
+        Some (Some (k1, r, List.rev_append t1 t2))
+      | _ -> Some (None)) s1 s2
 
-    | LetRec (bs, next) ->
-      let rec loop = function
-        | None, _ -> None
-        | t1, [] -> t1
-        | t1, (_, _, _, x) :: xs ->
-          let t1 = union_here (find_insert_point candidate x) t1 in
-          loop (t1, xs) in
-      loop (find_insert_point candidate next, bs)
+let rec contify r = match !r with
+  | Module _ ->
+    failwith "INVALID NESTED MODULE"
 
-    | LetPack (_, elts, next) when not (List.mem candidate elts) ->
-      find_insert_point candidate next
+  | Export xs ->
+    List.fold_left (fun s (_, v) -> M.add v None s) M.empty xs
 
-    | LetProj (_, _, v, next) when v <> candidate ->
-      find_insert_point candidate next
+  | Jmp (_, args) ->
+    List.fold_left (fun s v -> M.add v None s) M.empty args
 
-    | App (f, args, k) when not (List.mem candidate args) ->
-      if f = candidate then Some ([r], Some (k, r))
-      else Some ([], None)
+  | App (f, args, k) ->
+    let s = List.fold_left (fun s v -> M.add v None s) M.empty args in
+    M.update f (function
+      | None -> Some (Some (k, r, [r]))
+      | _ -> Some (None)) s
 
-    | Jmp (_, args) when not (List.mem candidate args) ->
-      Some ([], None)
+  | LetPack (v, elts, r) ->
+    let s = contify r in
+    let s = M.remove v s in
+    List.fold_left (fun s v -> M.add v None s) s elts
 
-    | Export xs when List.for_all (fun (_, v) -> v <> candidate) xs ->
-      Some ([], None)
+  | LetProj (v, _, t, r) ->
+    contify r |> M.remove v |> M.add t None
 
-    | _ -> None
+  | LetCont (_, args, body, next) ->
+    let s1 = contify next in
+    let s2 = contify body in
+    let s2 = List.fold_left (fun s v -> M.remove v s) s2 args in
+    merge r s2 s1
 
-let rec contify r =
-  match !r with
-    | LetPack (_, _, r)
-    | LetProj (_, _, _, r) ->
-      contify r
+  | LetFun (f, args, j, body, next) -> begin
+    let s1 = contify next in
+    match M.find_opt f s1 with
+      | None ->
+        (* binding is dead *)
+        r := !next;
+        s1
+      | Some v ->
+        let () = match v with
+          | None -> ()
+          | Some (k, new_anchor, sites) ->
+            (* rewrite the App nodes into Jmp nodes *)
+            List.iter (function
+              | { contents = App (_, args, _) } as r -> r := Jmp (f, args)
+              | _ -> failwith "INVALID APP NODE") sites;
+            (* relocate the contified f to the new location *)
+            r := !next;
+            new_anchor := LetCont (f, args, body, ref (!new_anchor));
+            (* also remap the argument k and parameter j *)
+            new_anchor := LetCont (j, [k], ref (Jmp (k, [k])), ref (!new_anchor)) in
 
-    | LetCont (_, _, body, r) ->
-      contify body;
-      contify r
+        let s1 = M.remove f s1 in
+        let s2 = contify body in
+        let s2 = List.fold_left (fun s v -> M.remove v s) s2 args in
 
-    | LetFun (f, args, j, body, next) -> begin
-      contify body;
-      contify next;
-      match find_insert_point f next with
-        | None -> ()
-        | Some (_, None) -> r := !next
-        | Some (sites, Some (k, new_anchor)) ->
-          (* rewrite the App nodes into Jmp nodes *)
-          List.iter (function
-            | { contents = App (_, args, _) } as r -> r := Jmp (f, args)
-            | _ -> failwith "INVALID APP NODE") sites;
-          (* relocate the contified f to the new location *)
-          r := !next;
-          new_anchor := LetCont (f, args, body, ref (!new_anchor));
-          (* also need to remap the argument k *)
-          new_anchor := LetCont (j, [k], ref (Jmp (k, [k])), ref (!new_anchor))
-    end
+        merge r s1 s2
+  end
 
-    | LetRec (bs, r) ->
-      List.iter (fun (_, _, _, body) -> contify body) bs;
-      contify r
+  | LetRec (bs, e) ->
+    (* TODO: Handle recursive contification *)
+    let s = contify e in
+    let s = List.fold_left (fun s (_, args, _, body) ->
+      let s' = contify body in
+      let s' = List.fold_left (fun s v -> M.remove v s) s' args in
+      merge r s' s) s bs in
 
-    | _ -> ()
+    List.fold_left (fun s (f, _, _, _) -> M.remove f s) s bs
 
 let transform e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module r -> contify r
+    | Module r -> contify r |> ignore
     | _ -> failwith "INVALID TERM ANCHOR"
