@@ -78,8 +78,62 @@ let rec contify r = match !r with
 
     List.fold_left (fun s (f, _, _, _) -> M.remove f s) s bs
 
-let transform e =
+(* this unfolds the letcont j v = k v that are synthesized during the
+ * contification step. note that doing this as a separate step is done to
+ * ensure the correctness of the other transformation *)
+let rec fold_cont s r flag = match !r with
+  | Module _ ->
+    failwith "INVALID NESTED MODULE"
+
+  | Export _ -> flag
+
+  | Jmp (j, args) -> begin
+    match M.find_opt j s with
+      | None -> flag
+      | Some j ->
+        r := Jmp (j, args);
+        true
+  end
+
+  | App (f, args, j) -> begin
+    match M.find_opt j s with
+      | None -> flag
+      | Some j ->
+        r := App (f, args, j);
+        true
+  end
+
+  | LetCont (bs, next) -> begin
+    let s = List.fold_left (fun s (j, _, _) ->
+      M.remove j s) s bs in
+    let flag = List.fold_left (fun flag (_, _, body) ->
+      fold_cont s body flag) flag bs in
+
+    let s, next = match bs with
+      | [j1, [p1], { contents = Jmp (j2, [a1]) }] when j1 <> j2 && p1 = a1 ->
+        r := !next;
+        M.add j1 j2 s, r
+      | _ -> s, next in
+
+    fold_cont s next flag
+  end
+
+  | LetFun (_, _, j, body, r) ->
+    flag |> fold_cont s r |> fold_cont (M.remove j s) body
+
+  | LetRec (bs, r) ->
+    let flag = fold_cont s r flag in
+    List.fold_left (fun flag (_, _, j, body) ->
+      fold_cont (M.remove j s) body flag) flag bs
+
+  | LetPack (_, _, r)
+  | LetProj (_, _, _, r) ->
+    fold_cont s r flag
+
+let rec transform e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module r -> contify r |> ignore
+    | Module r ->
+      let _ = contify r in
+      if fold_cont M.empty r false then transform e
     | _ -> failwith "INVALID TERM ANCHOR"
