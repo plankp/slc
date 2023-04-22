@@ -8,9 +8,11 @@ let rec collect_locals acc = function
     (* functions are not considered local, hence we don't look at the body *)
     collect_locals acc !e
 
-  | LetCont (_, args, body, e) ->
+  | LetCont (bs, e) ->
     (* continuations are compiled as goto's, so everything is local *)
-    collect_locals (collect_locals (List.rev_append args acc) !body) !e
+    let acc = collect_locals acc !e in
+    List.fold_left (fun acc (_, args, body) ->
+      collect_locals (List.rev_append args acc) !body) acc bs
 
   | LetProj (v, _, _, e)
   | LetPack (v, _, e) ->
@@ -18,6 +20,8 @@ let rec collect_locals acc = function
 
   | Export _ | Jmp _ | App _ -> acc
 
+  (* An example of this is letrec's
+   * which should have been removed post closure conversion *)
   | _ -> failwith "UNHANDLED LOWERING"
 
 let rec lower_function q f args k body =
@@ -44,12 +48,14 @@ and lower_value q kctx buf k = function
     let q = lower_function q f args k' body in
     lower_value q kctx buf k !e
 
-  | LetCont (j, args, body, e) ->
-    let kctx = M.add j args kctx in
-    let (q, xs1) = lower_value q kctx buf k !e in
-    bprintf buf "j%d:\n" j;
-    let (q, xs2) = lower_value q kctx buf k !body in
-    (q, List.rev_append xs2 xs1)
+  | LetCont (bs, e) ->
+    let kctx = List.fold_left (fun kctx (j, args, _) ->
+      M.add j args kctx) kctx bs in
+    let (q, xs) = lower_value q kctx buf k !e in
+    List.fold_left (fun (q, xs) (j, _, body) ->
+      bprintf buf "j%d:\n" j;
+      let (q, xs') = lower_value q kctx buf k !body in
+      (q, List.rev_append xs' xs)) (q, xs) bs
 
   | LetProj (v, i, t, e) ->
     bprintf buf "  v%d = ((void **) v%d)[%d];\n" v t i;

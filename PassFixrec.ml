@@ -18,14 +18,16 @@ let rec transform r = match !r with
   | Export xs ->
     List.fold_left (fun s (_, v) -> S.add v s) S.empty xs
 
-  | LetCont (_, args, body, e) ->
+  | LetCont (bs, e) ->
     (* we only care about functions due to their capturing semantics *)
-    let s = transform body in
-    let s = List.fold_left (fun s v -> S.remove v s) s args in
-    transform e |> S.union s
+    let s = transform e in
+    List.fold_left (fun s (_, args, body) ->
+      let p = transform body in
+      let p = List.fold_left (fun p v -> S.remove v p) p args in
+      S.union p s) s bs
 
   | LetFun (f, args, _, body, e) ->
-    (* we only care recursive ones *)
+    (* we only care about recursive ones *)
     let s = transform body in
     let s = List.fold_left (fun s v -> S.remove v s) s args in
     transform e |> S.remove f |> S.union s

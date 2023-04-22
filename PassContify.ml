@@ -33,11 +33,12 @@ let rec contify r = match !r with
   | LetProj (v, _, t, r) ->
     contify r |> M.remove v |> M.add t None
 
-  | LetCont (_, args, body, next) ->
-    let s1 = contify next in
-    let s2 = contify body in
-    let s2 = List.fold_left (fun s v -> M.remove v s) s2 args in
-    merge r s2 s1
+  | LetCont (bs, next) ->
+    let s = contify next in
+    List.fold_left (fun s (_, args, body) ->
+      let s' = contify body in
+      let s' = List.fold_left (fun s' v -> M.remove v s') s' args in
+      merge r s' s) s bs
 
   | LetFun (f, args, j, body, next) -> begin
     let s1 = contify next in
@@ -56,9 +57,9 @@ let rec contify r = match !r with
               | _ -> failwith "INVALID APP NODE") sites;
             (* relocate the contified f to the new location *)
             r := !next;
-            new_anchor := LetCont (f, args, body, ref (!new_anchor));
+            new_anchor := LetCont ([f, args, body], ref (!new_anchor));
             (* also remap the argument k and parameter j *)
-            new_anchor := LetCont (j, [k], ref (Jmp (k, [k])), ref (!new_anchor)) in
+            new_anchor := LetCont ([j, [k], ref (Jmp (k, [k]))], ref (!new_anchor)) in
 
         let s1 = M.remove f s1 in
         let s2 = contify body in

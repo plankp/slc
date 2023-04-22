@@ -1,7 +1,7 @@
 type term =
   | Module of term ref
   | Export of (string * int) list
-  | LetCont of int * int list * term ref * term ref
+  | LetCont of (int * int list * term ref) list * term ref
   | LetFun of int * int list * int * term ref * term ref
   | LetRec of (int * int list * int * term ref) list * term ref
   | Jmp of int * int list
@@ -26,13 +26,25 @@ let rec dump' (n : int) (t : term) : unit =
       List.iter (fun (n, i) ->
         Printf.printf " %s, %%v%d" n i) xs
 
-    | LetCont (k, args, body, e) ->
+    | LetCont ([], e) ->
+      dump' n !e
+
+    | LetCont ((k, args, body) :: bs, e) ->
       dump_prefix ();
+
       Printf.printf "letcont %%k%d" k;
       List.iter (fun v ->
         Printf.printf " %%v%d" v) args;
       Printf.printf " =\n";
       dump' (n + 1) !body;
+
+      List.iter (fun (k, args, body) ->
+        Printf.printf "and     %%k%d" k;
+        List.iter (fun v ->
+          Printf.printf " %%v%d" v) args;
+        Printf.printf " =\n";
+        dump' (n + 1) !body) bs;
+
       Printf.printf " in\n";
       dump' n !e
 

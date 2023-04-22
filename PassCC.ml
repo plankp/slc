@@ -10,13 +10,14 @@ let rec cc r id =
     | Export xs ->
       (id, List.fold_left (fun s (_, v) -> S.add v s) S.empty xs)
 
-    | LetCont (_, args, body, e) ->
-      (* continuations cannot escape, so no need to closure convert *)
-      let (id, fv1) = cc body id in
-      let fv1 = List.fold_left (fun fv1 a -> S.remove a fv1) fv1 args in
-
-      let (id, fv2) = cc e id in
-      (id, S.union fv1 fv2)
+    | LetCont (bs, e) ->
+      (* continuations cannot escape, so no need to closure convert.
+       * just propagate the FVs *)
+      let (id, esc) = cc e id in
+      List.fold_left (fun (id, esc) (_, args, body) ->
+        let (id, p) = cc body id in
+        let p = List.fold_left (fun p a -> S.remove a p) p args in
+        (id, S.union p esc)) (id, esc) bs
 
     | LetFun (f, args, k, body, e) ->
       let (id, esc) = cc body id in
