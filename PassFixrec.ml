@@ -11,6 +11,44 @@ type 'a vertex =
   ; mutable onstack : bool
   }
 
+let compute_levels (g : 'a vertex M.t) : 'a vertex list list =
+  (* use Tarjan's scc *)
+  let index = ref 0 in
+  let stack = ref [] in
+  let rebuild = ref [] in
+
+  let rec connect v =
+    v.index <- Some !index;
+    v.lowlink <- !index;
+    v.onstack <- true;
+    index := !index + 1;
+    stack := v :: !stack;
+
+    S.iter (fun w ->
+      let w = M.find w g in
+      match w.index with
+        | None ->
+          connect w;
+          v.lowlink <- min v.lowlink w.lowlink
+        | Some w_index ->
+          v.lowlink <- min v.lowlink w_index) v.deps;
+
+    if Some v.lowlink = v.index then begin
+      let rec loop scc =
+        match !stack with
+          | [] -> failwith "INVALID STATE"
+          | w :: xs ->
+            stack := xs;
+            w.onstack <- false;
+            let scc = w :: scc in
+            if w != v then loop scc
+            else rebuild := scc :: !rebuild in
+      loop []
+    end in
+
+  M.iter (fun _ v -> if v.index = None then connect v) g;
+  !rebuild
+
 let rec transform r = match !r with
   | Module _ ->
     failwith "INVALID NESTED MODULE"
@@ -54,10 +92,6 @@ let rec transform r = match !r with
     let defs = List.fold_left (fun s (f, _, _, _) ->
       S.add f s) S.empty bs in
 
-    let s = transform e in
-    let s = List.fold_left S.union s fvs in
-    let s = S.diff s defs in
-
     (* build the dependency graph of the letrec bindings *)
     let g = List.fold_left2 (fun g ((f, _, _, _) as info) deps ->
       let v =
@@ -65,51 +99,18 @@ let rec transform r = match !r with
         ; index = None; lowlink = ~-1; onstack = false } in
       M.add f v g) M.empty bs fvs in
 
-    (* use Tarjan's scc *)
-    let index = ref 0 in
-    let stack = ref [] in
-    let rebuild = ref [] in
+    let s = transform e in
+    let s = List.fold_left S.union s fvs in
+    let s = S.diff s defs in
 
-    let rec connect v =
-      v.index <- Some !index;
-      v.lowlink <- !index;
-      v.onstack <- true;
-      index := !index + 1;
-      stack := v :: !stack;
-
-      S.iter (fun w ->
-        let w = M.find w g in
-        match w.index with
-          | None ->
-            connect w;
-            v.lowlink <- min v.lowlink w.lowlink
-          | Some w_index ->
-            v.lowlink <- min v.lowlink w_index) v.deps;
-
-      if Some v.lowlink = v.index then begin
-        let rec loop scc =
-          match !stack with
-            | [] -> failwith "INVALID STATE"
-            | w :: xs ->
-              stack := xs;
-              w.onstack <- false;
-              let scc = w :: scc in
-              if w != v then loop scc
-              else rebuild := scc :: !rebuild in
-        loop []
-      end in
-
-    M.iter (fun _ v -> if v.index = None then connect v) g;
-
-    (* here we do the rewrite *)
+    (* here we do the rewrite inside out *)
+    let rebuild = compute_levels g in
     r := List.fold_left (fun e scc ->
       match scc with
         | [{ info = (f, args, k, body); deps; _ }] when not (S.mem f deps) ->
           LetFun (f, args, k, body, ref e)
         | _ ->
-          LetRec (List.map (fun v -> v.info) scc, ref e)) !e !rebuild;
-
-    (* propagate the FV's upwards *)
+          LetRec (List.map (fun v -> v.info) scc, ref e)) !e rebuild;
     s
 
 let transform e =

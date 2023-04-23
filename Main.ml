@@ -29,14 +29,12 @@ let program =
       ], ref (Export ["snd", 1]))))
 *)
 
-(*
 let program =
   Module (ref
     (LetRec (
       [ (1, [], 10, ref (App (3, [], 10)))
       ; (3, [], 11, ref (App (1, [], 11)))
       ], ref (Export ["inf1", 1]))))
-*)
 
 (*
 let program =
@@ -66,6 +64,7 @@ let program =
       ], ref (Export ["bad", 1]))))
 *)
 
+(*
 let program =
   Module (ref (
     LetFun (1, [2], 3, ref (
@@ -73,6 +72,7 @@ let program =
         LetCont ([7, [8], ref (Jmp (3, [8]))], ref (
           App (4, [2], 7)))))), ref (
       Export ["id", 1]))))
+*)
 
 let () =
   print_endline "Original";
