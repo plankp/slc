@@ -50,7 +50,7 @@ let rec check_same_return s r = match !r with
       let q' = check_same_return s' body in
       merge_usage r q' q) q bs
 
-  | LetFun (f, args, _, _, body, next) ->
+  | LetFun ((f, args, _, _, body), next) ->
     let q1 = check_same_return (S.remove f s) next in
     let s' = List.fold_left (fun s v -> S.remove v s) s args in
     let q2 = check_same_return s' body in
@@ -106,7 +106,7 @@ let rec contify r = match !r with
       let q = List.fold_left (fun q a -> S.remove a q) q args in
       S.union q s) s bs
 
-  | LetFun (f, args, pk, ph, body, next) -> begin
+  | LetFun ((f, args, pk, ph, body), next) -> begin
     let s = contify next in
     if not (S.mem f s) then (r := !next; s)
     else begin
@@ -284,7 +284,7 @@ let rec fold_cont s r flag = match !r with
     fold_cont s next flag
   end
 
-  | LetFun (_, _, k, h, body, r) ->
+  | LetFun ((_, _, k, h, body), r) ->
     flag |> fold_cont s r |> fold_cont (s |> M.remove k |> M.remove h) body
 
   | LetRec (bs, r) ->

@@ -21,7 +21,7 @@ let rec lower_function q f args k h body id =
   buf :: q, id
 
 and lower_value q label k h sv sk id buf = function
-  | LetFun (f, args, k', h', body, e) ->
+  | LetFun ((f, args, k', h', body), e) ->
     let (q, id) = lower_function q f args k' h' body id in
     lower_value q label k h (M.add f (sprintf "@f%d" f) sv) sk id buf !e
 

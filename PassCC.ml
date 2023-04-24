@@ -19,7 +19,7 @@ let rec cc r id =
         let p = List.fold_left (fun p a -> S.remove a p) p args in
         (id, S.union p esc)) (id, esc) bs
 
-    | LetFun (f, args, k, h, body, e) ->
+    | LetFun ((f, args, k, h, body), e) ->
       let (id, esc) = cc body id in
       let esc = List.fold_left (fun esc a -> S.remove a esc) esc args in
 
@@ -33,7 +33,7 @@ let rec cc r id =
         slot + 1) esc 0 in
 
       r := LetPack (id_pack, S.elements esc, ref (
-            LetFun (f, args @ [id_envp], k, h, body, ref (
+            LetFun ((f, args @ [id_envp], k, h, body), ref (
               LetPack (f, [f; id_pack], e)))));
 
       (* LetFun is NOT recursive *)
@@ -82,8 +82,8 @@ let rec cc r id =
         |> List.fold_right (fun (f, _, _, _, _) xs -> f :: xs) bs in
       let tail = List.fold_left (fun e (f, _, _, _, _) ->
         ref (LetPack (f, [f; id_pack], e))) e bs in
-      r := List.fold_right (fun (f, args, k, h, body) tail ->
-        LetFun (f, args, k, h, body, ref tail)) bs (LetPack (id_pack, fat_env, tail));
+      r := List.fold_right (fun f tail ->
+        LetFun (f, ref tail)) bs (LetPack (id_pack, fat_env, tail));
 
       let (id, fv2) = cc e id in
       let fv2 = List.fold_left (fun fv2 (f, _, _, _, _) -> S.remove f fv2) fv2 bs in

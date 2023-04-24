@@ -64,7 +64,7 @@ let rec transform r = match !r with
       let p = List.fold_left (fun p v -> S.remove v p) p args in
       S.union p s) s bs
 
-  | LetFun (f, args, _, _, body, e) ->
+  | LetFun ((f, args, _, _, body), e) ->
     (* we only care about recursive ones *)
     let s = transform body in
     let s = List.fold_left (fun s v -> S.remove v s) s args in
@@ -110,8 +110,8 @@ let rec transform r = match !r with
     let rebuild = compute_levels g in
     r := List.fold_left (fun e scc ->
       match scc with
-        | [{ info = (f, args, k, h, body); deps; _ }] when not (S.mem f deps) ->
-          LetFun (f, args, k, h, body, ref e)
+        | [{ info = (f, _, _, _, _) as fv; deps; _ }] when not (S.mem f deps) ->
+          LetFun (fv, ref e)
         | _ ->
           LetRec (List.map (fun v -> v.info) scc, ref e)) !e rebuild;
     s

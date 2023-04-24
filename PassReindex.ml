@@ -24,7 +24,7 @@ let rec reindex' r sv sk id = match !r with
     r := LetCont (bs, e);
     reindex' e sv sk id
 
-  | LetFun (f, args, k, h, body, e) ->
+  | LetFun ((f, args, k, h, body), e) ->
     (* LetFun is NOT recursive, so don't augment sv here *)
     let f', id = id, id + 1 in
     (* the args only affect the binder body *)
@@ -33,7 +33,7 @@ let rec reindex' r sv sk id = match !r with
     let k, id, sk' = id, id + 1, M.add k id sk in
     let h, id, sk' = id, id + 1, M.add h id sk' in
 
-    r := LetFun (f', List.rev args, k, h, body, e);
+    r := LetFun ((f', List.rev args, k, h, body), e);
     id |> reindex' body sv' sk' |> reindex' e (M.add f f' sv) sk
 
   | LetRec (bs, e) ->

@@ -2,78 +2,65 @@ open Ast
 
 (*
 let program =
-  Module (["fst"], ref
-    (LetFun (1, [2], 10, 20, ref (
-      LetFun (3, [4], 11, 21, ref (
-        Jmp (11, [2])), ref (
-        Jmp (10, [3])))), ref (
-      Export ["fst", 1]))))
-*)
+  Module (["fst"], ref (
+    LetFun ((1, [2], 10, 20, ref (
+      LetFun ((3, [4], 11, 21, ref (
+        Jmp (11, [2]))), ref (
+      Jmp (10, [3]))))), ref (
+    Export ["fst", 1]))))
 
-(*
 let program =
-  Module (["snd"], ref
-    (LetFun (1, [2], 10, 20, ref (
-      LetFun (3, [4], 11, 21, ref (
-        Jmp (11, [4])), ref (
-        Jmp (10, [3])))), ref (
-      Export ["snd", 1]))))
-*)
+  Module (["snd"], ref (
+    LetFun ((1, [2], 10, 20, ref (
+      LetFun ((3, [4], 11, 21, ref (
+        Jmp (11, [4]))), ref (
+      Jmp (10, [3]))))), ref (
+    Export ["snd", 1]))))
 
-(*
 let program =
-  Module (["snd"], ref
-    (LetRec (
+  Module (["snd"], ref (
+    LetRec (
       [ (1, [2], 10, 20, ref (Jmp (10, [3])))
       ; (3, [4], 11, 21, ref (Jmp (11, [4])))
       ], ref (Export ["snd", 1]))))
-*)
 
-(*
 let program =
-  Module (["inf1"], ref
-    (LetRec (
+  Module (["inf1"], ref (
+    LetRec (
       [ (1, [], 10, 20, ref (App (3, [], 10, 20)))
       ; (3, [], 11, 21, ref (App (1, [], 11, 21)))
       ], ref (Export ["inf1", 1]))))
-*)
 
-(*
 let program =
-  Module (["inf2"], ref
-    (LetFun (1, [4; 5], 2, 10, ref (
-      LetCont ([3, [6; 7], ref (Jmp (3, [7; 6]))], ref (Jmp (3, [5; 4])))),
-      ref (Export ["inf2", 1]))))
-*)
+  Module (["inf2"], ref (
+    LetFun ((1, [4; 5], 2, 10, ref (
+      LetCont ([3, [6; 7], ref (Jmp (3, [7; 6]))], ref (
+      Jmp (3, [5; 4]))))), ref (
+    Export ["inf2", 1]))))
 
-(*
 let program =
-  Module (["inf3"], ref
-    (LetFun (1, [4; 5], 2, 10, ref (
+  Module (["inf3"], ref (
+    LetFun ((1, [4; 5], 2, 10, ref (
       LetRec (
         [ (3, [6; 7], 9, 20, ref (App (3, [7; 6], 9, 20)))
-        ], ref (App (3, [5; 4], 2, 10)))),
-      ref (Export ["inf3", 1]))))
-*)
+        ], ref (App (3, [5; 4], 2, 10))))), ref (
+      Export ["inf3", 1]))))
 
-(*
 let program =
-  Module (["bad"], ref
-    (LetRec (
+  Module (["bad"], ref (
+    LetRec (
       [ (1, [2; 3], 10, 20, ref (
           LetCont ([11, [4], ref (Jmp (10, [4]))], ref (
-            App (1, [2; 3], 11, 20)))))
+          App (1, [2; 3], 11, 20)))))
       ], ref (Export ["bad", 1]))))
-*)
 
-(*
 let program =
   Module (["id"], ref (
-    LetFun (1, [2], 3, 10, ref (
+    LetFun ((1, [2], 3, 10, ref (
       LetRec ([4, [5], 6, 20, ref (Jmp (6, [5]))], ref (
-        LetCont ([7, [8], ref (Jmp (3, [8]))], ref (
-          App (4, [2], 7, 10)))))), ref (
-      Export ["id", 1]))))
+      LetCont ([7, [8], ref (Jmp (3, [8]))], ref (
+      App (4, [2], 7, 10))))))), ref (
+    Export ["id", 1]))))
 *)
 
 let program =
