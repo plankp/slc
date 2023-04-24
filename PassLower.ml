@@ -3,166 +3,180 @@ open Printf
 
 module M = Map.Make (Int)
 
-let rec collect_locals acc = function
-  | LetFun (_, _, _, _, e) ->
-    (* functions are not considered local, hence we don't look at the body *)
-    collect_locals acc !e
-
-  | LetCont (bs, e) ->
-    (* continuations are compiled as goto's, so everything is local *)
-    let acc = collect_locals acc !e in
-    List.fold_left (fun acc (_, args, body) ->
-      collect_locals (List.rev_append args acc) !body) acc bs
-
-  | LetProj (v, _, _, e)
-  | LetPack (v, _, e) ->
-    collect_locals (v :: acc) !e
-
-  | Export _ | Jmp _ | App _ -> acc
-
-  (* An example of this is letrec's
-   * which should have been removed post closure conversion *)
-  | _ -> failwith "UNHANDLED LOWERING"
-
-let rec lower_function q f args k body =
+let rec lower_function q f args k h body id =
   let buf = Buffer.create 32 in
-  bprintf buf "void *v%d(" f;
-  let () = match args with
-    | [] -> ()
+  bprintf buf "define tailcc ptr @f%d(" f;
+  let sv = match args with
+    | [] -> M.empty
     | x :: xs ->
-      bprintf buf "void *v%d" x;
-      List.iter (bprintf buf ", void *v%d") xs in
+      bprintf buf "ptr %%v%d" x;
+      let sv = M.singleton x (sprintf "%%v%d" x) in
+      List.fold_left (fun sv x ->
+        bprintf buf ", ptr %%v%d" x;
+        M.add x (sprintf "%%v%d" x) sv) sv xs in
   bprintf buf ") {\n";
-  let () = match collect_locals [] !body with
-    | [] -> ()
-    | x :: xs ->
-      bprintf buf "  void *v%d" x;
-      List.iter (bprintf buf ", *v%d") xs;
-      bprintf buf ";\n\n" in
-  let (q, _) = lower_value q M.empty buf k !body in
+  bprintf buf "_0:\n";
+  let (q, id) = lower_value q "_0" (Some k) (Some h) sv M.empty id buf !body in
   bprintf buf "}";
-  buf :: q
+  buf :: q, id
 
-and lower_value q kctx buf k = function
-  | LetFun (f, args, k', body, e) ->
-    let q = lower_function q f args k' body in
-    lower_value q kctx buf k !e
+and lower_value q label k h sv sk id buf = function
+  | LetFun (f, args, k', h', body, e) ->
+    let (q, id) = lower_function q f args k' h' body id in
+    lower_value q label k h (M.add f (sprintf "@f%d" f) sv) sk id buf !e
 
   | LetCont (bs, e) ->
-    let kctx = List.fold_left (fun kctx (j, args, _) ->
-      M.add j args kctx) kctx bs in
-    let (q, xs) = lower_value q kctx buf k !e in
-    List.fold_left (fun (q, xs) (j, _, body) ->
-      bprintf buf "j%d:\n" j;
-      let (q, xs') = lower_value q kctx buf k !body in
-      (q, List.rev_append xs' xs)) (q, xs) bs
+    let sk = List.fold_left (fun sk (j, args, _) ->
+      let slots = List.map (fun _ -> ref []) args in
+      M.add j slots sk) sk bs in
+    let (q, id) = lower_value q label k h sv sk id buf !e in
+    let (xs, q, id) = List.fold_left (fun (xs, q, id) (j, args, body) ->
+      let buf = Buffer.create 32 in
+      let sv = List.fold_left (fun sv a ->
+        M.add a (sprintf "%%v%d" a) sv) sv args in
+      let (q, id) = lower_value q (sprintf "k%d" j) k h sv sk id buf !body in
+      ((j, args, buf) :: xs, q, id)) ([], q, id) bs in
 
-  | LetProj (v, i, t, e) ->
-    bprintf buf "  v%d = ((void **) v%d)[%d];\n" v t i;
-    lower_value q kctx buf k !e
+    List.iter (fun (j, args, blq) ->
+      bprintf buf "k%d:\n" j;
+      List.iter2 (fun a p ->
+        bprintf buf "  %%v%d = phi ptr" a;
+        let () = match !p with
+          | [] -> ()  (* shouldn't happen *)
+          | (v, j) :: xs ->
+            bprintf buf " [%s, %%%s]" v j;
+            List.iter (fun (v, j) ->
+              bprintf buf ", [%s, %%%s]" v j) xs in
+        bprintf buf "\n") args (M.find j sk);
+      Buffer.add_buffer buf blq) xs;
+    (q, id)
 
   | LetPack (v, [], e) ->
-    bprintf buf "  v%d = (void *) 0;\n" v;
-    lower_value q kctx buf k !e
+    (* we use NULL for this *)
+    lower_value q label k h (M.add v "null" sv) sk id buf !e
 
   | LetPack (v, elts, e) ->
-    bprintf buf "  v%d = GC_MALLOC(%d * sizeof (void *));\n" v (List.length elts);
-    List.iteri (fun i e ->
-      bprintf buf "  ((void **) v%d)[%d] = v%d;\n" v i e) elts;
-    lower_value q kctx buf k !e
+    let width = List.length elts |> Int64.of_int |> Int64.mul 8L in
+    bprintf buf "  %%v%d = call ptr @GC_MALLOC(i64 noundef %Ld)\n" v width;
+    let (id, _) = List.fold_left (fun (id, i) e ->
+      bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %%v%d, i64 %d\n" v id v i;
+      bprintf buf "  store ptr %%v%d.%Lu, ptr %s\n" v id (M.find e sv);
+      (Int64.succ id, i + 1)) (id, 0) elts in
+    lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk id buf !e
+
+  | LetProj (v, i, t, e) ->
+    bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %s, i64 %d\n" v id (M.find t sv) i;
+    bprintf buf "  %%v%d = load ptr, ptr %%v%d.%Lu\n" v v id;
+    lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk (Int64.succ id) buf !e
 
   | Export xs ->
     List.iter (fun (n, v) ->
-      bprintf buf "  G_%s = v%d;\n" n v) xs;
-    (q, xs)
+      bprintf buf "  store ptr %s, ptr @G_%s, align 8\n" (M.find v sv) n) xs;
+    q, id
 
-  | Jmp (j, [v]) when j = k ->
-    bprintf buf "  return v%d;\n" v;
-    (q, [])
+  (* return *)
+  | Jmp (j, [v]) when k = Some j ->
+    bprintf buf "  ret ptr %s\n" (M.find v sv);
+    q, id
 
+  (* throw / raise an exception *)
+  | Jmp (j, [v]) when h = Some j ->
+    bprintf buf "  %%q.%Lu = call ptr @__cxa_allocate_exception(i64 8)\n" id;
+    bprintf buf "  store ptr %s, ptr %%q.%Lu\n" (M.find v sv) id;
+    bprintf buf "  call void @__cxa_throw(ptr %%q.%Lu, ptr @_ZTIPv, ptr null)\n" id;
+    bprintf buf "  unreachable\n";
+    q, Int64.succ id
+
+  (* goto / branch to block *)
   | Jmp (j, args) ->
-    (* Jmp (j, [a1; a2; ...]) ~~>
-     *
-     * t1 = a1;   <-- copy is needed in case of screwy swapping loops
-     * t2 = a2;
-     * ...
-     * p1 = t1;   <-- ps come from j
-     * p2 = t2;
-     * ...
-     * goto j; *)
-    bprintf buf "{\n";
-    List.iteri (bprintf buf "  void *t%d = v%d;\n") args;
-    let params = M.find j kctx in
-    List.iteri (fun i p -> bprintf buf "  v%d = t%d;\n" p i) params;
-    bprintf buf "  goto j%d;\n}\n" j;
-    (q, [])
+    let params = M.find j sk in
+    List.iter2 (fun p a -> p := (M.find a sv, label) :: !p) params args;
+    bprintf buf "  br label %%k%d\n" j;
+    q, id
 
-  | App (f, args, j) when j = k ->
-    (* we cheat by using clang's musttail *)
-    bprintf buf "  __attribute__((musttail)) return ((void *(*)(";
-    let () = match args with
-      | [] -> ()
-      | _ :: xs ->
-        bprintf buf "void *";
-        List.iter (fun _ -> bprintf buf ", void *") xs in
-    bprintf buf ")) v%d)(" f;
+  (* function calls, which is either
+   * a tail call, an ordinary call, or a call with an exception handler *)
+  | App (f, args, j1, j2) ->
+    let is_tail_call = k = Some j1 && h = Some j2 in
+    let needs_ehandler = h <> Some j2 in
+
+    let specifier =
+      if is_tail_call then "musttail call"
+      else if needs_ehandler then "invoke"
+      else "call" in
+    bprintf buf "  %%q.%Lu = %s tailcc ptr %s(" id specifier (M.find f sv);
     let () = match args with
       | [] -> ()
       | x :: xs ->
-        bprintf buf "v%d" x;
-        List.iter (bprintf buf ", v%d") xs in
-    bprintf buf ");\n";
-    (q, [])
+        bprintf buf "ptr %s" (M.find x sv);
+        List.iter (fun x -> bprintf buf ", ptr %s" (M.find x sv)) xs in
+    bprintf buf ")\n";
 
-  | App (f, args, j) -> begin
-    match M.find j kctx with
-      | [p] ->
-        bprintf buf "  v%d = ((void *(*)(" p;
-        let () = match args with
-          | [] -> ()
-          | _ :: xs ->
-            bprintf buf "void *";
-            List.iter (fun _ -> bprintf buf ", void *") xs in
-        bprintf buf ")) v%d)(" f;
-        let () = match args with
-          | [] -> ()
-          | x :: xs ->
-            bprintf buf "v%d" x;
-            List.iter (bprintf buf ", v%d") xs in
-        bprintf buf ");\n";
-        bprintf buf "  goto j%d;\n" j;
-        (q, [])
+    let id = Int64.succ id in
+    let id = if is_tail_call then begin
+      bprintf buf "  ret ptr %%q.%Lu\n" id;
+      id
+    end else begin
+      (* regardless of whether a handler is needed, the continuation k needs
+       * it's incoming phi edges hooked-up *)
+      let params = M.find j1 sk in
+      List.iter2 (fun p a -> p := a :: !p) params
+        [sprintf "%%q.%Lu" id, label];
 
-      | _ -> failwith "INVALID CONTINUATION ARITY"
-  end
+      if not needs_ehandler then begin
+        bprintf buf "  br label %%k%d\n" j1;
+        id
+      end else begin
+        (* the success continuation is done setup, but we need to also deal
+         * with the handler. here we synthesize a dummy landing pad that will
+         * extract the caught value and jump to the continuation h. *)
+        bprintf buf "  to label %%k%d unwind label %%lpad.%Lu\n" j1 id;
+        bprintf buf "%%lpad.%Lu:\n" id;
+        bprintf buf "  %%info.%Lu = landingpad { ptr, i32 } catch ptr @_ZTIPv\n" id;
+        bprintf buf "  %%except.%Lu = extractvalue { ptr, i32 } %%info.%Lu, 0\n" id id;
+        bprintf buf "  %%selector.%Lu = extractvalue { ptr, i32 } %%info.%Lu, 1\n" id id;
+        bprintf buf "  %%typeid.%Lu = call i32 @llvm.eh.typeid.for(@_ZTIPv)\n" id;
+        bprintf buf "  %%match.%Lu = icmp eq i32 %%selector.%Lu, %%typeid.%Lu\n" id id id;
+        bprintf buf "  br i1 %%match.%Lu, label %%catch.%Lu, label %%end.%Lu \n" id id id;
+        bprintf buf "%%catch.%Lu:\n" id;
+        bprintf buf "  %%thrown.%Lu = call ptr @__cxa_begin_catch(ptr %%except.%Lu)\n" id id;
+        bprintf buf "  call void @__cxa_end_catch()\n";
+        bprintf buf "  br label %%k%d\n" j2;
+        bprintf buf "%%end.%Lu:\n" id;
+        bprintf buf "  resume { ptr, i32 } %%info.%Lu\n" id;
 
-  | _ -> failwith "UNKNOWN VALUE TO LOWER"
+        let params = M.find j2 sk in
+        List.iter2 (fun p a -> p := a :: !p) params
+          [sprintf "%%thrown.%Lu" id, sprintf "%%catch.%Lu" id];
+        Int64.succ id
+      end
+    end in
+    q, id
+
+  | _ -> failwith "Unsupported lowering"
 
 let lower e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module m ->
+    | Module (v, m) ->
       let buf = Buffer.create 32 in
-      bprintf buf "void INIT(void) {\n";
-      let () = match collect_locals [] !m with
-        | [] -> ()
-        | x :: xs ->
-          bprintf buf "  void *v%d" x;
-          List.iter (bprintf buf ", *v%d") xs;
-          bprintf buf ";\n\n" in
-      let q, gsym = lower_value [] M.empty buf ~-1 !m in
+      bprintf buf "define void @INIT() {\n";
+      bprintf buf "_0:\n";
+      let (q, _) = lower_value [] "_0" None None M.empty M.empty 1L buf !m in
+      bprintf buf "  ret void\n";
       bprintf buf "}";
-      let q = List.rev_append q [buf] in
 
-      printf "#include \"gc.h\"\n\n";
-      let () = match gsym with
-        | [] -> ()
-        | (n, _) :: xs ->
-          printf "void *G_%s" n;
-          List.iter (fun (n, _) -> printf ", *G_%s" n) xs;
-          printf ";\n\n" in
+      printf "declare ptr @GC_MALLOC(i64)\n";
+      printf "declare ptr @__cxa_allocate_exception(i64)\n";
+      printf "declare void @__cxa_throw(ptr, ptr, ptr)\n";
+      printf "\n";
+      printf "@_ZTIPv = external constant ptr\n";
+      printf "\n";
+      List.iter (printf "@G_%s = global ptr null, align 8\n") v;
+      printf "\n";
+
+      let q = List.rev_append q [buf] in
       List.iter (fun buf ->
         Buffer.output_buffer stdout buf;
         printf "\n\n") q
-
     | _ -> failwith "INVALID TERM ANCHOR"

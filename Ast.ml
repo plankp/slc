@@ -1,11 +1,11 @@
 type term =
-  | Module of term ref
+  | Module of string list * term ref
   | Export of (string * int) list
   | LetCont of (int * int list * term ref) list * term ref
-  | LetFun of int * int list * int * term ref * term ref
-  | LetRec of (int * int list * int * term ref) list * term ref
+  | LetFun of int * int list * int * int * term ref * term ref
+  | LetRec of (int * int list * int * int * term ref) list * term ref
   | Jmp of int * int list
-  | App of int * int list * int
+  | App of int * int list * int * int
   | LetPack of int * int list * term ref
   | LetProj of int * int * int * term ref
 
@@ -15,9 +15,11 @@ let rec dump' (n : int) (t : term) : unit =
       Printf.printf "  "
     done in
   match t with
-    | Module m ->
+    | Module (v, m) ->
       dump_prefix ();
-      Printf.printf "module =\n";
+      Printf.printf "module";
+      List.iter (Printf.printf " %s") v;
+      Printf.printf " =\n";
       dump' (n + 1) !m
 
     | Export xs ->
@@ -48,12 +50,12 @@ let rec dump' (n : int) (t : term) : unit =
       Printf.printf " in\n";
       dump' n !e
 
-    | LetFun (f, args, k, body, e) ->
+    | LetFun (f, args, k, h, body, e) ->
       dump_prefix ();
       Printf.printf "letfun %%v%d" f;
       List.iter (fun v ->
         Printf.printf " %%v%d" v) args;
-      Printf.printf " %%k%d =\n" k;
+      Printf.printf " %%k%d %%k%d =\n" k h;
       dump' (n + 1) !body;
       Printf.printf " in\n";
       dump' n !e
@@ -61,22 +63,22 @@ let rec dump' (n : int) (t : term) : unit =
     | LetRec ([], e) ->
       dump' n !e
 
-    | LetRec ((f, args, k, body) :: bs, e) ->
+    | LetRec ((f, args, k, h, body) :: bs, e) ->
       dump_prefix ();
 
       Printf.printf "letrec %%v%d" f;
       List.iter (fun v ->
         Printf.printf " %%v%d" v) args;
-      Printf.printf " %%k%d =\n" k;
+      Printf.printf " %%k%d %%k%d =\n" k h;
       dump' (n + 1) !body;
 
-      List.iter (fun (f, args, k, body) ->
+      List.iter (fun (f, args, k, h, body) ->
         Printf.printf "\n";
         dump_prefix ();
         Printf.printf "and    %%v%d" f;
         List.iter (fun v ->
           Printf.printf " %%v%d" v) args;
-        Printf.printf " %%k%d =\n" k;
+        Printf.printf " %%k%d %%k%d =\n" k h;
         dump' (n + 1) !body) bs;
 
       Printf.printf " in\n";
@@ -88,12 +90,12 @@ let rec dump' (n : int) (t : term) : unit =
       List.iter (fun v ->
         Printf.printf " %%v%d" v) args
 
-    | App (f, args, j) ->
+    | App (f, args, k, h) ->
       dump_prefix ();
       Printf.printf "App %%v%d" f;
       List.iter (fun v ->
         Printf.printf " %%v%d" v) args;
-      Printf.printf " %%k%d" j
+      Printf.printf " %%k%d %%k%d" k h
 
     | LetPack (v, elts, e) ->
       dump_prefix ();

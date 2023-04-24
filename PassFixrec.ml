@@ -64,7 +64,7 @@ let rec transform r = match !r with
       let p = List.fold_left (fun p v -> S.remove v p) p args in
       S.union p s) s bs
 
-  | LetFun (f, args, _, body, e) ->
+  | LetFun (f, args, _, _, body, e) ->
     (* we only care about recursive ones *)
     let s = transform body in
     let s = List.fold_left (fun s v -> S.remove v s) s args in
@@ -73,7 +73,7 @@ let rec transform r = match !r with
   | Jmp (_, args) ->
     List.fold_left (fun s v -> S.add v s) S.empty args
 
-  | App (f, args, _) ->
+  | App (f, args, _, _) ->
     List.fold_left (fun s v -> S.add v s) S.empty (f :: args)
 
   | LetPack (v, elts, e) ->
@@ -85,15 +85,15 @@ let rec transform r = match !r with
     transform e |> S.remove v |> S.add t
 
   | LetRec (bs, e) ->
-    let fvs = List.map (fun (_, args, _, body) ->
+    let fvs = List.map (fun (_, args, _, _, body) ->
       let s = transform body in
       List.fold_left (fun s v -> S.remove v s) s args) bs in
 
-    let defs = List.fold_left (fun s (f, _, _, _) ->
+    let defs = List.fold_left (fun s (f, _, _, _, _) ->
       S.add f s) S.empty bs in
 
     (* build the dependency graph of the letrec bindings *)
-    let g = List.fold_left2 (fun g ((f, _, _, _) as info) deps ->
+    let g = List.fold_left2 (fun g ((f, _, _, _, _) as info) deps ->
       let v =
         { info; deps = S.inter deps defs
         ; index = None; lowlink = ~-1; onstack = false } in
@@ -107,8 +107,8 @@ let rec transform r = match !r with
     let rebuild = compute_levels g in
     r := List.fold_left (fun e scc ->
       match scc with
-        | [{ info = (f, args, k, body); deps; _ }] when not (S.mem f deps) ->
-          LetFun (f, args, k, body, ref e)
+        | [{ info = (f, args, k, h, body); deps; _ }] when not (S.mem f deps) ->
+          LetFun (f, args, k, h, body, ref e)
         | _ ->
           LetRec (List.map (fun v -> v.info) scc, ref e)) !e rebuild;
     s
@@ -116,5 +116,5 @@ let rec transform r = match !r with
 let transform e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module r -> transform r |> ignore
+    | Module (_, r) -> transform r |> ignore
     | _ -> failwith "INVALID TERM ANCHOR"

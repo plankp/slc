@@ -24,28 +24,30 @@ let rec reindex' r sv sk id = match !r with
     r := LetCont (bs, e);
     reindex' e sv sk id
 
-  | LetFun (f, args, k, body, e) ->
+  | LetFun (f, args, k, h, body, e) ->
     (* LetFun is NOT recursive, so don't augment sv here *)
     let f', id = id, id + 1 in
     (* the args only affect the binder body *)
     let args, id, sv' = List.fold_left (fun (xs, id, sv') a ->
       (id :: xs, id + 1, M.add a id sv')) ([], id, sv) args in
     let k, id, sk' = id, id + 1, M.add k id sk in
+    let h, id, sk' = id, id + 1, M.add h id sk' in
 
-    r := LetFun (f', List.rev args, k, body, e);
+    r := LetFun (f', List.rev args, k, h, body, e);
     id |> reindex' body sv' sk' |> reindex' e (M.add f f' sv) sk
 
   | LetRec (bs, e) ->
     (* we need to augment sv with all recursive binders first *)
-    let bs, id, sv = List.fold_left (fun (xs, id, sv) (f, args, k, body) ->
-      ((id, args, k, body) :: xs, id + 1, M.add f id sv)) ([], id, sv) bs in
+    let bs, id, sv = List.fold_left (fun (xs, id, sv) (f, args, k, h, body) ->
+      ((id, args, k, h, body) :: xs, id + 1, M.add f id sv)) ([], id, sv) bs in
 
     (* then reindex binder body *)
-    let bs, id = List.fold_left (fun (xs, id) (f, args, k, body) ->
+    let bs, id = List.fold_left (fun (xs, id) (f, args, k, h, body) ->
       let args, id, sv = List.fold_left (fun (xs, id, sv) a ->
         (id :: xs, id + 1, M.add a id sv)) ([], id, sv) args in
       let k, id, sk = id, id + 1, M.add k id sk in
-      ((f, List.rev args, k, body) :: xs, reindex' body sv sk id)) ([], id) bs in
+      let h, id, sk = id, id + 1, M.add h id sk in
+      ((f, List.rev args, k, h, body) :: xs, reindex' body sv sk id)) ([], id) bs in
 
     r := LetRec (bs, e);
     reindex' e sv sk id
@@ -54,8 +56,8 @@ let rec reindex' r sv sk id = match !r with
     r := Jmp (M.find k sk, List.map (fun i -> M.find i sv) xs);
     id
 
-  | App (f, xs, k) ->
-    r := App (M.find f sv, List.map (fun i -> M.find i sv) xs, M.find k sk);
+  | App (f, xs, k, h) ->
+    r := App (M.find f sv, List.map (fun i -> M.find i sv) xs, M.find k sk, M.find h sk);
     id
 
   | LetPack (v, elts, e) ->
@@ -73,5 +75,5 @@ let rec reindex' r sv sk id = match !r with
     reindex' e sv sk id
 
 let reindex = function
-  | Module r -> reindex' r M.empty M.empty 0
+  | Module (_, r) -> reindex' r M.empty M.empty 0
   | _ -> failwith "INVALID TERM ANCHOR"
