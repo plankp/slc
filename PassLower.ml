@@ -60,7 +60,7 @@ and lower_value q label k h sv sk id buf = function
     bprintf buf "  %%v%d = call ptr @GC_MALLOC(i64 noundef %Ld)\n" v width;
     let (id, _) = List.fold_left (fun (id, i) e ->
       bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %%v%d, i64 %d\n" v id v i;
-      bprintf buf "  store ptr %%v%d.%Lu, ptr %s\n" v id (M.find e sv);
+      bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find e sv) v id;
       (Int64.succ id, i + 1)) (id, 0) elts in
     lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk id buf !e
 
