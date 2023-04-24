@@ -1,3 +1,8 @@
+module M = Map.Make (struct
+  type t = int option
+  let compare = Option.compare Int.compare
+end)
+
 type term =
   | Module of string list * term ref
   | Export of (string * int) list
@@ -6,8 +11,10 @@ type term =
   | LetRec of (int * int list * int * int * term ref) list * term ref
   | Jmp of int * int list
   | App of int * int list * int * int
+  | LetCons of int * int * int list * term ref
   | LetPack of int * int list * term ref
   | LetProj of int * int * int * term ref
+  | Case of int * int M.t
 
 let rec dump' (n : int) (t : term) : unit =
   let dump_prefix () =
@@ -97,6 +104,14 @@ let rec dump' (n : int) (t : term) : unit =
         Printf.printf " %%v%d" v) args;
       Printf.printf " %%k%d %%k%d" k h
 
+    | LetCons (v, i, elts, e) ->
+      dump_prefix ();
+      Printf.printf "let %%v%d = cons %d" v i;
+      List.iter (fun v ->
+        Printf.printf " %%v%d" v) elts;
+      Printf.printf " in\n";
+      dump' n !e
+
     | LetPack (v, elts, e) ->
       dump_prefix ();
       Printf.printf "let %%v%d = pack" v;
@@ -109,6 +124,15 @@ let rec dump' (n : int) (t : term) : unit =
       dump_prefix ();
       Printf.printf "let %%v%d = project %d %%v%d in\n" v i p;
       dump' n !e
+
+    | Case (v, cases) ->
+      dump_prefix ();
+      Printf.printf "Case %%v%d of {" v;
+      M.iter (fun i k ->
+        match i with
+          | Some i -> Printf.printf " %d -> %%k%d;" i k
+          | _ -> Printf.printf " _ -> %%k%d;" k) cases;
+      Printf.printf " }"
 
 let dump t =
   dump' 0 t

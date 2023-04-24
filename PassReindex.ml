@@ -60,6 +60,13 @@ let rec reindex' r sv sk id = match !r with
     r := App (M.find f sv, List.map (fun i -> M.find i sv) xs, M.find k sk, M.find h sk);
     id
 
+  | LetCons (v, i, elts, e) ->
+    let elts = List.map (fun i -> M.find i sv) elts in
+    let v, id, sv = id, id + 1, M.add v id sv in
+
+    r := LetCons (v, i, elts, e);
+    reindex' e sv sk id
+
   | LetPack (v, elts, e) ->
     let elts = List.map (fun i -> M.find i sv) elts in
     let v, id, sv = id, id + 1, M.add v id sv in
@@ -73,6 +80,10 @@ let rec reindex' r sv sk id = match !r with
 
     r := LetProj (v, i, p, e);
     reindex' e sv sk id
+
+  | Case (v, cases) ->
+    r := Case (M.find v sv, Ast.M.map (fun k -> M.find k sk) cases);
+    id
 
 let reindex = function
   | Module (_, r) -> reindex' r M.empty M.empty 0

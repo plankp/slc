@@ -38,11 +38,13 @@ let program =
       ], ref (Export ["inf1", 1]))))
 *)
 
+(*
 let program =
   Module (["inf2"], ref
     (LetFun (1, [4; 5], 2, 10, ref (
       LetCont ([3, [6; 7], ref (Jmp (3, [7; 6]))], ref (Jmp (3, [5; 4])))),
       ref (Export ["inf2", 1]))))
+*)
 
 (*
 let program =
@@ -73,6 +75,14 @@ let program =
           App (4, [2], 7, 10)))))), ref (
       Export ["id", 1]))))
 *)
+
+let program =
+  Module (["ulist"; "nil"], ref (
+    LetCons (1, 0, [], ref (
+      LetPack (2, [], ref (
+        LetCons (1, 1, [2; 1], ref (
+          LetCont ([3, [4; 5], ref (Export ["ulist", 1; "nil", 5])], ref (
+            Case (1, Ast.M.singleton (Some 1) 3)))))))))))
 
 let () =
   print_endline "Original";

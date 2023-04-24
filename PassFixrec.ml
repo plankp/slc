@@ -76,7 +76,10 @@ let rec transform r = match !r with
   | App (f, args, _, _) ->
     List.fold_left (fun s v -> S.add v s) S.empty (f :: args)
 
-  | LetPack (v, elts, e) ->
+  | Case (v, _) ->
+    S.singleton v
+
+  | LetPack (v, elts, e) | LetCons (v, _, elts, e) ->
     let s = transform e in
     let s = S.remove v s in
     List.fold_left (fun s v -> S.add v s) s elts

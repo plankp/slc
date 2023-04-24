@@ -104,7 +104,17 @@ let rec cc r id =
 
       (id, List.fold_left (fun s v -> S.add v s) (S.singleton f) args)
 
-    | _ -> failwith "TODO"
+    | LetPack (v, elts, e) | LetCons (v, _, elts, e) ->
+      let (id, esc) = cc e id in
+      let esc = List.fold_left (fun s v -> S.add v s) (S.remove v esc) elts in
+      (id, esc)
+
+    | LetProj (v, _, t, e) ->
+      let (id, esc) = cc e id in
+      (id, esc |> S.remove v |> S.add t)
+
+    | Case (v, _) ->
+      (id, S.singleton v)
 
 let transform e =
   let id = PassReindex.reindex e in

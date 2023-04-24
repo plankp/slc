@@ -64,6 +64,19 @@ and lower_value q label k h sv sk id buf = function
       (Int64.succ id, i + 1)) (id, 0) elts in
     lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk id buf !e
 
+  | LetCons (v, i, elts, e) ->
+    (* 32-bit tag + a 64-bit pointer for each element *)
+    let width = List.length elts |> Int64.of_int |> Int64.mul 8L in
+    let width = if width = 0L then 4L else Int64.add width 8L in
+    bprintf buf "  %%v%d = call ptr @GC_MALLOC(i64 noundef %Ld)\n" v width;
+    bprintf buf "  %%v%d.t = getelementptr i32, ptr %%v%d, i64 0\n" v v;
+    bprintf buf "  store i32 %d, ptr %%v%d.t\n" i v;
+    let (id, _) = List.fold_left (fun (id, i) e ->
+      bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %%v%d, i64 %d\n" v id v i;
+      bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find e sv) v id;
+      (Int64.succ id, i + 1)) (id, 1) elts in
+    lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk id buf !e
+
   | LetProj (v, i, t, e) ->
     bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %s, i64 %d\n" v id (M.find t sv) i;
     bprintf buf "  %%v%d = load ptr, ptr %%v%d.%Lu\n" v v id;
@@ -92,6 +105,54 @@ and lower_value q label k h sv sk id buf = function
     let params = M.find j sk in
     List.iter2 (fun p a -> p := (M.find a sv, label) :: !p) params args;
     bprintf buf "  br label %%k%d\n" j;
+    q, id
+
+  | Case (v, cases) ->
+    let v = M.find v sv in
+    bprintf buf "  %%tag.%Lu = load i32, ptr %s\n" id v;
+    bprintf buf "  switch i32 %%tag.%Lu, label %%case.%Lu.else [\n" id id;
+    let has_default = ref false in
+    Ast.M.iter (fun i _ ->
+      match i with
+        | Some i -> bprintf buf "    i32 %d, label %%case.%Lu.%d\n" i id i
+        | _ -> has_default := true) cases;
+    bprintf buf "  ]\n";
+
+    if not !has_default then begin
+      (* assume a lack of explicit default case means it is unreachable! *)
+      bprintf buf "case.%Lu.else:\n" id;
+      bprintf buf "  unreachable\n"
+    end;
+    let id = Ast.M.fold (fun i j fresh ->
+      let label = match i with
+        | Some i -> sprintf "case.%Lu.%d" id i
+        | _ -> sprintf "case.%Lu.else" id in
+      bprintf buf "%s:\n" label;
+
+      (* like in Jmp, handle the three possibilities *)
+      if Some j = k then begin
+        bprintf buf "  %%q.%Lu.p = getelementptr ptr, ptr %s, i64 1\n" fresh v;
+        bprintf buf "  %%q.%Lu.v = load ptr, ptr %%q.%Lu.p\n" fresh fresh;
+        bprintf buf "  ret ptr %%q.%Lu.v" fresh;
+        Int64.succ fresh
+      end else if Some j = h then begin
+        bprintf buf "  %%q.%Lu.p = getelementptr ptr, ptr %s, i64 1\n" fresh v;
+        bprintf buf "  %%q.%Lu.v = load ptr, ptr %%q.%Lu.p\n" fresh fresh;
+        bprintf buf "  %%q.%Lu = call ptr @__cxa_allocate_exception(i64 8)\n" fresh;
+        bprintf buf "  store ptr %%q.%Lu.v, ptr %%q.%Lu\n" fresh fresh;
+        bprintf buf "  call void @__cxa_throw(ptr %%q.%Lu, ptr @_ZTIPv, ptr null)\n" fresh;
+        bprintf buf "  unreachable\n";
+        Int64.succ fresh
+      end else begin
+        let params = M.find j sk in
+        let _ = List.fold_left (fun offs p ->
+          bprintf buf "  %%q.%Lu.l%d = getelementptr ptr, ptr %s, i64 %d\n" fresh offs v offs;
+          bprintf buf "  %%q.%Lu.v%d = load ptr, ptr %%q.%Lu.l%d\n" fresh offs fresh offs;
+          p := (sprintf "%%q.%Lu.v%d" fresh offs, label) :: !p;
+          offs + 1) 1 params in
+        bprintf buf "  br label %%k%d\n" j;
+        fresh
+      end) cases (Int64.succ id) in
     q, id
 
   (* function calls, which is either
