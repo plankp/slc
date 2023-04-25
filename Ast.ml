@@ -5,19 +5,23 @@ end)
 
 type term =
   | Module of string list * term ref
-  | Export of (string * int) list
-  | LetCont of (int * int list * term ref) list * term ref
+  | Export of (string * valuevar) list
+  | LetCont of (contvar * valuevar list * term ref) list * term ref
   | LetFun of funval * term ref
   | LetRec of funval list * term ref
-  | Jmp of int * int list
-  | App of int * int list * int * int
-  | LetCons of int * int * int list * term ref
-  | LetPack of int * int list * term ref
-  | LetProj of int * int * int * term ref
-  | Case of int * int M.t
+  | Jmp of contvar * valuevar list
+  | App of valuevar * valuevar list * contvar * contvar
+  | LetCons of valuevar * int * valuevar list * term ref
+  | LetPack of valuevar * valuevar list * term ref
+  | LetProj of valuevar * int * valuevar * term ref
+  | Case of valuevar * contvar M.t
 
+and contvar =
+  int
+and valuevar =
+  int
 and funval =
-  int * int list * int * int * term ref
+  valuevar * valuevar list * contvar * contvar * term ref
 
 let rec dump' (n : int) (t : term) : unit =
   let dump_prefix () =
