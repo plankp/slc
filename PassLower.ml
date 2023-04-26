@@ -14,7 +14,7 @@ let rec lower_function q f args k h body id =
       List.fold_left (fun sv x ->
         bprintf buf ", ptr %%v%d" x;
         M.add x (sprintf "%%v%d" x) sv) sv xs in
-  bprintf buf ") {\n";
+  bprintf buf ") personality ptr @__gxx_personality_v0 {\n";
   bprintf buf "_0:\n";
   let (q, id) = lower_value q "_0" (Some k) (Some h) sv M.empty id buf !body in
   bprintf buf "}";
@@ -192,23 +192,23 @@ and lower_value q label k h sv sk id buf = function
          * with the handler. here we synthesize a dummy landing pad that will
          * extract the caught value and jump to the continuation h. *)
         bprintf buf "  to label %%k%d unwind label %%lpad.%Lu\n" j1 id;
-        bprintf buf "%%lpad.%Lu:\n" id;
+        bprintf buf "lpad.%Lu:\n" id;
         bprintf buf "  %%info.%Lu = landingpad { ptr, i32 } catch ptr @_ZTIPv\n" id;
         bprintf buf "  %%except.%Lu = extractvalue { ptr, i32 } %%info.%Lu, 0\n" id id;
         bprintf buf "  %%selector.%Lu = extractvalue { ptr, i32 } %%info.%Lu, 1\n" id id;
-        bprintf buf "  %%typeid.%Lu = call i32 @llvm.eh.typeid.for(@_ZTIPv)\n" id;
+        bprintf buf "  %%typeid.%Lu = call i32 @llvm.eh.typeid.for(ptr @_ZTIPv)\n" id;
         bprintf buf "  %%match.%Lu = icmp eq i32 %%selector.%Lu, %%typeid.%Lu\n" id id id;
         bprintf buf "  br i1 %%match.%Lu, label %%catch.%Lu, label %%end.%Lu \n" id id id;
-        bprintf buf "%%catch.%Lu:\n" id;
+        bprintf buf "catch.%Lu:\n" id;
         bprintf buf "  %%thrown.%Lu = call ptr @__cxa_begin_catch(ptr %%except.%Lu)\n" id id;
         bprintf buf "  call void @__cxa_end_catch()\n";
         bprintf buf "  br label %%k%d\n" j2;
-        bprintf buf "%%end.%Lu:\n" id;
+        bprintf buf "end.%Lu:\n" id;
         bprintf buf "  resume { ptr, i32 } %%info.%Lu\n" id;
 
         let params = M.find j2 sk in
         List.iter2 (fun p a -> p := a :: !p) params
-          [sprintf "%%thrown.%Lu" id, sprintf "%%catch.%Lu" id];
+          [sprintf "%%thrown.%Lu" id, sprintf "catch.%Lu" id];
         Int64.succ id
       end
     end in
@@ -221,7 +221,7 @@ let lower e =
   match e with
     | Module (v, m) ->
       let buf = Buffer.create 32 in
-      bprintf buf "define void @INIT() {\n";
+      bprintf buf "define void @INIT() personality ptr @__gxx_personality_v0 {\n";
       bprintf buf "_0:\n";
       let (q, _) = lower_value [] "_0" None None M.empty M.empty 1L buf !m in
       bprintf buf "  ret void\n";
@@ -230,6 +230,10 @@ let lower e =
       printf "declare ptr @GC_MALLOC(i64)\n";
       printf "declare ptr @__cxa_allocate_exception(i64)\n";
       printf "declare void @__cxa_throw(ptr, ptr, ptr)\n";
+      printf "declare ptr @__cxa_begin_catch(ptr)\n";
+      printf "declare ptr @__cxa_end_catch()\n";
+      printf "declare i32 @llvm.eh.typeid.for(ptr)\n";
+      printf "declare i32 @__gxx_personality_v0(...)\n";
       printf "\n";
       printf "@_ZTIPv = external constant ptr\n";
       printf "\n";
