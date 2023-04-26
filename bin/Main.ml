@@ -1,4 +1,4 @@
-open Ast
+open Slc
 
 (*
 let program =
@@ -64,34 +64,34 @@ let program =
 *)
 
 let program =
-  Module (["ulist"; "nil"], ref (
-    LetCons (1, 0, [], ref (
-      LetPack (2, [], ref (
-        LetCons (1, 1, [2; 1], ref (
-          LetCont ([3, [4; 5], ref (Export ["ulist", 1; "nil", 5])], ref (
-            Case (1, Ast.M.singleton (Some 1) 3)))))))))))
+  Ast.Module (["ulist"; "nil"], ref (
+    Ast.LetCons (1, 0, [], ref (
+      Ast.LetPack (2, [], ref (
+        Ast.LetCons (1, 1, [2; 1], ref (
+          Ast.LetCont ([3, [4; 5], ref (Ast.Export ["ulist", 1; "nil", 5])], ref (
+            Ast.Case (1, Ast.M.singleton (Some 1) 3)))))))))))
 
 let () =
   print_endline "Original";
-  dump program;
+  Ast.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Fixrec";
   PassFixrec.transform program;
-  dump program;
+  Ast.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Contification";
   PassContify.transform program;
-  dump program;
+  Ast.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Closure Conversion";
   PassCC.transform program;
-  dump program;
+  Ast.dump program;
   print_endline "";
   print_endline "";
 

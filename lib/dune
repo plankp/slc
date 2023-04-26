@@ -1,0 +1,9 @@
+(library
+ (name slc)
+ (libraries menhirLib))
+
+;(ocamllex Lexer)
+
+;(menhir
+; (modules Parser)
+; (flags --table --explain))
