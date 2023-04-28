@@ -219,11 +219,11 @@ and lower_value q label k h sv sk id buf = function
 let lower e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module (v, m) ->
+    | Module (v, h, m) ->
       let buf = Buffer.create 32 in
       bprintf buf "define void @INIT() personality ptr @__gxx_personality_v0 {\n";
       bprintf buf "_0:\n";
-      let (q, _) = lower_value [] "_0" None None M.empty M.empty 1L buf !m in
+      let (q, _) = lower_value [] "_0" None (Some !h) M.empty M.empty 1L buf !m in
       bprintf buf "  ret void\n";
       bprintf buf "}";
 

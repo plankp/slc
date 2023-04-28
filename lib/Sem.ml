@@ -401,7 +401,7 @@ and lower_case v id cases h k =
 
 let lower e =
   try
-    let (_, term) = lower_funk e 2 M.empty 1 (fun id v ->
+    let (_, term) = lower_funk e 1 M.empty 0 (fun id v ->
       (id, Export ["_", v])) in
-    Ok (Module (["_"], ref term))
+    Ok (Module (["_"], ref 0, ref term))
   with Failure e -> Error e

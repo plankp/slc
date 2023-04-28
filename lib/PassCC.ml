@@ -119,7 +119,7 @@ let rec cc r id =
 let transform e =
   let id = PassReindex.reindex e in
   match e with
-    | Module (_, r) ->
+    | Module (_, _, r) ->
       let (_, s) = cc r id in
       if not (S.is_empty s) then
         failwith "INVALID ESCAPING FV"

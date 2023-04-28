@@ -86,5 +86,8 @@ let rec reindex' r sv sk id = match !r with
     id
 
 let reindex = function
-  | Module (_, r) -> reindex' r M.empty M.empty 0
+  | Module (_, h, r) ->
+    let old_h = !h in
+    h := 0;
+    reindex' r M.empty (M.singleton old_h 0) 1
   | _ -> failwith "INVALID TERM ANCHOR"

@@ -119,5 +119,5 @@ let rec transform r = match !r with
 let transform e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module (_, r) -> transform r |> ignore
+    | Module (_, _, r) -> transform r |> ignore
     | _ -> failwith "INVALID TERM ANCHOR"

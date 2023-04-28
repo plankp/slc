@@ -4,7 +4,7 @@ module M = Map.Make (struct
 end)
 
 type term =
-  | Module of string list * term ref
+  | Module of string list * contvar ref * term ref
   | Export of (string * valuevar) list
   | LetCont of (contvar * valuevar list * term ref) list * term ref
   | LetFun of funval * term ref
@@ -37,11 +37,11 @@ let rec dump' (n : int) (t : term) : unit =
     dump' (n + 1) !body in
 
   match t with
-    | Module (v, m) ->
+    | Module (v, h, m) ->
       dump_prefix ();
       Printf.printf "module";
       List.iter (Printf.printf " %s") v;
-      Printf.printf " =\n";
+      Printf.printf " %%k%d =\n" !h;
       dump' (n + 1) !m
 
     | Export xs ->

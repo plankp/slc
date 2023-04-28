@@ -300,7 +300,7 @@ let rec fold_cont s r flag = match !r with
 let rec transform e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module (_, r) ->
+    | Module (_, _, r) ->
       let _ = contify r in
       if fold_cont M.empty r false then transform e
     | _ -> failwith "INVALID TERM ANCHOR"
