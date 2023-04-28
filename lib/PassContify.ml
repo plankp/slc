@@ -1,4 +1,4 @@
-open Ast
+open Hir
 
 module M = Map.Make (Int)
 module S = Set.Make (Int)
@@ -262,7 +262,7 @@ let rec fold_cont s r flag = match !r with
 
   | Case (v, cases) -> begin
     let modified = ref flag in
-    r := Case (v, Ast.M.map (fun k ->
+    r := Case (v, Hir.M.map (fun k ->
       match M.find_opt k s with
         | None -> k
         | Some k -> modified := true; k) cases);

@@ -1,5 +1,3 @@
-open Slc
-
 (*
 let program =
   Module (["fst"], ref (
@@ -61,39 +59,54 @@ let program =
       LetCont ([7, [8], ref (Jmp (3, [8]))], ref (
       App (4, [2], 7, 10))))))), ref (
     Export ["id", 1]))))
-*)
 
 let program =
-  Ast.Module (["ulist"; "nil"], ref (
-    Ast.LetCons (1, 0, [], ref (
-      Ast.LetPack (2, [], ref (
-        Ast.LetCons (1, 1, [2; 1], ref (
-          Ast.LetCont ([3, [4; 5], ref (Ast.Export ["ulist", 1; "nil", 5])], ref (
-            Ast.Case (1, Ast.M.singleton (Some 1) 3)))))))))))
+  Hir.Module (["ulist"; "nil"], ref (
+    Hir.LetCons (1, 0, [], ref (
+      Hir.LetPack (2, [], ref (
+        Hir.LetCons (1, 1, [2; 1], ref (
+          Hir.LetCont ([3, [4; 5], ref (Hir.Export ["ulist", 1; "nil", 5])], ref (
+            Hir.Case (1, Hir.M.singleton (Some 1) 3)))))))))))
+*)
 
-let () =
+open Slc
+
+let transform_program program =
   print_endline "Original";
-  Ast.dump program;
+  Hir.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Fixrec";
   PassFixrec.transform program;
-  Ast.dump program;
+  Hir.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Contification";
   PassContify.transform program;
-  Ast.dump program;
+  Hir.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Closure Conversion";
   PassCC.transform program;
-  Ast.dump program;
+  Hir.dump program;
   print_endline "";
   print_endline "";
 
   print_endline "Lower to C";
   PassLower.lower program
+
+let () =
+  let lexbuf = Lexing.from_channel stdin in
+  match Driver.parse Parser.Incremental.prog lexbuf with
+    | Error e -> print_endline e
+    | Ok None -> ()
+    | Ok (Some m) ->
+      match Sem.check m with
+        | Error e -> print_endline e
+        | Ok _ ->
+          match Sem.lower m with
+            | Error e -> print_endline e
+            | Ok m -> transform_program m |> ignore

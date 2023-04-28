@@ -1,4 +1,4 @@
-open Ast
+open Hir
 
 module M = Map.Make (Int)
 
@@ -82,7 +82,7 @@ let rec reindex' r sv sk id = match !r with
     reindex' e sv sk id
 
   | Case (v, cases) ->
-    r := Case (M.find v sv, Ast.M.map (fun k -> M.find k sk) cases);
+    r := Case (M.find v sv, Hir.M.map (fun k -> M.find k sk) cases);
     id
 
 let reindex = function

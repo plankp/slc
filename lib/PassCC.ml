@@ -1,4 +1,4 @@
-open Ast
+open Hir
 
 module S = Set.Make (Int)
 

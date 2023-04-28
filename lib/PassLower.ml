@@ -1,4 +1,4 @@
-open Ast
+open Hir
 open Printf
 
 module M = Map.Make (Int)
@@ -112,7 +112,7 @@ and lower_value q label k h sv sk id buf = function
     bprintf buf "  %%tag.%Lu = load i32, ptr %s\n" id v;
     bprintf buf "  switch i32 %%tag.%Lu, label %%case.%Lu.else [\n" id id;
     let has_default = ref false in
-    Ast.M.iter (fun i _ ->
+    Hir.M.iter (fun i _ ->
       match i with
         | Some i -> bprintf buf "    i32 %d, label %%case.%Lu.%d\n" i id i
         | _ -> has_default := true) cases;
@@ -123,7 +123,7 @@ and lower_value q label k h sv sk id buf = function
       bprintf buf "case.%Lu.else:\n" id;
       bprintf buf "  unreachable\n"
     end;
-    let id = Ast.M.fold (fun i j fresh ->
+    let id = Hir.M.fold (fun i j fresh ->
       let label = match i with
         | Some i -> sprintf "case.%Lu.%d" id i
         | _ -> sprintf "case.%Lu.else" id in
