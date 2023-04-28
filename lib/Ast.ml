@@ -1,6 +1,8 @@
 type expr =
   | EVar of string
   | ETup of expr list
+  | ENil
+  | ECons of expr * expr
   | EApp of expr * expr list
   | ELam of pat list * expr
   | ELamCase of (pat * expr) list
@@ -12,3 +14,5 @@ and pat =
   | PIgn
   | PVar of string * pat
   | PTup of pat list
+  | PNil
+  | PCons of pat * pat

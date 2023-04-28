@@ -3,7 +3,8 @@ open Ast
 %}
 
 %token LPAREN RPAREN COMMA
-%token LSQUARE RSQUARE
+%token LSQUARE RSQUARE CONS
+%token LCURLY RCURLY
 %token SLASH ARROW
 %token LET REC SET IN
 %token CASE OF IGNORE BIND
@@ -24,6 +25,10 @@ expr:
   | LET b = binders IN e = expr { ELet (b, e) }
   | REC b = binders IN e = expr { ERec (b, e) }
   | CASE e = expr OF k = cases { ECase (e, k) }
+  | e = expr_cons { e }
+
+expr_cons:
+  | hd = expr_app; CONS; tl = expr_cons { ECons (hd, tl) }
   | e = expr_app { e }
 
 binders:
@@ -41,11 +46,18 @@ case:
   | p = pattern ARROW e = expr { (p, e) }
 
 pattern:
+  | hd = pattern_atom; CONS; tl = pattern { PCons (hd, tl) }
+  | p = pattern_atom { p }
+
+pattern_atom:
   | LPAREN; e = pattern; RPAREN { e }
-  | LSQUARE; e = patterns; RSQUARE { PTup e }
+  | LCURLY; e = patterns; RCURLY { PTup e }
+  | LSQUARE; e = patterns; RSQUARE {
+    List.fold_right (fun hd tl -> PCons (hd, tl)) e PNil
+  }
   | IGNORE { PIgn }
   | n = IDENT { PVar (n, PIgn) }
-  | n = IDENT; BIND; p = pattern { PVar (n, p) }
+  | n = IDENT; BIND; p = pattern_atom { PVar (n, p) }
 
 patterns:
   | x = pattern; COMMA; xs = patterns { x :: xs }
@@ -58,7 +70,10 @@ expr_app:
 
 expr_atom:
   | LPAREN; e = expr; RPAREN { e }
-  | LSQUARE; e = exprs; RSQUARE { ETup e }
+  | LCURLY; e = exprs; RCURLY { ETup e }
+  | LSQUARE; e = exprs; RSQUARE {
+    List.fold_right (fun hd tl -> ECons (hd, tl)) e ENil
+  }
   | e = IDENT { EVar e }
 
 exprs:

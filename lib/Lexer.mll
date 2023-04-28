@@ -15,10 +15,13 @@ rule read = parse
   | ')'     { RPAREN }
   | '['     { LSQUARE }
   | ']'     { RSQUARE }
+  | '{'     { LCURLY }
+  | '}'     { RCURLY }
   | '_'     { IGNORE }
   | '@'     { BIND }
   | '\\'    { SLASH }
   | "->"    { ARROW }
+  | "::"    { CONS }
   | '='     { SET }
   | ','     { COMMA }
   | "let"   { LET }

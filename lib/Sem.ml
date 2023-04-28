@@ -12,6 +12,17 @@ type typ =
   | TyPly of Z.t
   | TyArr of typ * typ
   | TyTup of typ list
+  | TyDat of datadef * typ list
+
+and datadef =
+  Z.t list * (string, int * typ list) Hashtbl.t
+
+let datadef_List =
+  let m = Hashtbl.create 2 in
+  let self = ([Z.zero], m) in
+  Hashtbl.add m "[]" (0, []);
+  Hashtbl.add m "::" (1, [TyPly Z.zero; (TyDat (self, [TyPly Z.zero]))]);
+  self
 
 let new_tyvar () : typ =
   let rec typ = TyVar { typ; key = Z.zero } in
@@ -33,7 +44,8 @@ let occurs_in (q : typ) (t : typ) : bool =
         | _ when x == q -> true
         | TyVar _ | TyPly _ -> loop xs
         | TyArr (a, r) -> loop (a :: r :: xs)
-        | TyTup ys -> if loop ys then true else loop xs in
+        | TyTup ys | TyDat (_, ys) ->
+          if loop ys then true else loop xs in
   loop [t]
 
 let unify (a : typ) (b : typ) : unit =
@@ -58,12 +70,17 @@ let unify (a : typ) (b : typ) : unit =
           loop ((a1, a2) :: (r1, r2) :: xs)
 
         | TyTup e1, TyTup e2 ->
-          let xs = try
-            List.fold_left2 (fun acc x y -> (x, y) :: acc) xs e1 e2
-          with _ -> failwith "Impossible type unification" in
-          loop xs
+          loop_tail xs e1 e2
 
-        | _ -> failwith "Impossible type unification" in
+        | TyDat (k1, e1), TyDat (k2, e2) when k1 == k2 ->
+          loop_tail xs e1 e2
+
+        | _ -> failwith "Impossible type unification"
+  and loop_tail xs x y =
+    let xs = try
+      List.fold_left2 (fun acc x y -> (x, y) :: acc) xs x y
+    with _ -> failwith "Impossible type unification" in
+    loop xs in
   loop [(a, b)]
 
 let inst (a : typ) : typ =
@@ -71,6 +88,7 @@ let inst (a : typ) : typ =
   let rec walk = function
     | TyArr (a, r) -> TyArr (walk a, walk r)
     | TyTup xs -> TyTup (List.map walk xs)
+    | TyDat (k, xs) -> TyDat (k, List.map walk xs)
     | TyVar _ as t -> t
     | TyPly k ->
       match Hashtbl.find_opt map k with
@@ -88,7 +106,8 @@ let collect_free (s : typ M.t) =
     match t with
       | TyPly _ -> v
       | TyArr (a, r) -> v |> fold_free a |> fold_free r
-      | TyTup xs -> List.fold_left (fun v t -> fold_free t v) v xs
+      | TyTup xs | TyDat (_, xs) ->
+        List.fold_left (fun v t -> fold_free t v) v xs
       | TyVar ({ key; _ } as r) ->
         match Hashtbl.find_opt map key with
           | Some q when q == t -> v
@@ -109,6 +128,7 @@ let gen s t =
       | TyPly _ -> failwith "Invalid poly type"
       | TyArr (a, r) -> TyArr (walk a, walk r)
       | TyTup xs -> TyTup (List.map walk xs)
+      | TyDat (k, xs) -> TyDat (k, List.map walk xs)
       | TyVar ({ key; _ } as r) ->
         match Hashtbl.find_opt mmap key with
           | Some q when q == t -> t (* not free *)
@@ -133,6 +153,16 @@ let rec check' s = function
 
   | Ast.ETup xs ->
     TyTup (List.map (check' s) xs)
+
+  | Ast.ENil ->
+    let eltty = new_tyvar () in
+    TyDat (datadef_List, [eltty])
+
+  | Ast.ECons (hd, tl) ->
+    let eltty = check' s hd in
+    let lstty = check' s tl in
+    unify lstty (TyDat (datadef_List, [eltty]));
+    lstty
 
   | Ast.ELam ([], _) ->
     failwith "INVALID ELAM NODE"
@@ -219,6 +249,16 @@ and check_pat' s = function
       (s, p :: acc)) (s, []) xs in
     (s, TyTup (List.rev xs))
 
+  | Ast.PNil ->
+    let eltty = new_tyvar () in
+    (s, TyDat (datadef_List, [eltty]))
+
+  | Ast.PCons (hd, tl) ->
+    let (s, eltty) = check_pat' s hd in
+    let (s, lstty) = check_pat' s tl in
+    unify lstty (TyDat (datadef_List, [eltty]));
+    (s, lstty)
+
 and check_pat p =
   check_pat' M.empty p
 
@@ -261,6 +301,18 @@ let rec lower_funk e id s h k =
           let id, tail = k (id + 1) name in
           (id, LetPack (name, List.rev acc, ref tail)) in
       loop id [] xs
+
+    | Ast.ENil ->
+      let name, id = id, id + 1 in
+      let (id, term) = k id name in
+      (id, LetCons (name, 0, [], ref term))
+
+    | Ast.ECons (hd, tl) ->
+      lower_funk hd id s h (fun id hd ->
+        lower_funk tl id s h (fun id tl ->
+          let name, id = id, id + 1 in
+          let (id, term) = k id name in
+          (id, LetCons (name, 1, [hd; tl], ref term))))
 
     | Ast.EApp (f, xs) ->
       let rec loop id acc = function
@@ -348,14 +400,14 @@ and lower_case v id cases h k =
   (* expands the scrutinee and the pattern matrix by a decons pattern *)
   let expand v = function
     | [] -> failwith "PATTERN MATRIX DIMENSION MISMATCH"
-    | (p, s, e) :: xs ->
+    | ((p, s, e) :: xs) as rows ->
       (* currently expands by the left-most decons term on the first row *)
       let rec loop vinit pinit s = function
         | v :: vs, Ast.PTup elts :: ps ->
           (* Transform:
-           *   case { v } of { [p1, p2, ...] } -> e
+           *   case v of { p1, p2, ... } -> e
            * to:
-           *   case { v#0, v#1, ... } of { p1, p2, ... } -> e *)
+           *   case v#0, v#1, ... of p1, p2, ... -> e *)
           let start = id in
           let scrut = v in
           let rec spec id vmid fill pmid = function
@@ -381,6 +433,47 @@ and lower_case v id cases h k =
                 (i + 1, LetProj (start + i, i, scrut, ref term))) (0, term) elts in
               (id, term) in
           spec id [] [] [] elts
+        | v :: vs, (Ast.PNil | Ast.PCons _) :: _ ->
+          (* Transform:
+           *   case v of [] -> e
+           * to:
+           *   case v of [] -> e, _ -> ...
+           *
+           * Transform:
+           *   case v of p1 :: p2 -> e
+           * to:
+           *   case v of p1 :: u -> (case u of p2 -> e), _ -> ... *)
+
+          let (mnil, mcons) = List.fold_right (fun (p, s, e) (mnil, mcons) ->
+            let rec coiter pinit s = function
+              | [], Ast.PIgn :: ps ->
+                (* since it's ignored, it could match both (::) and [], so need to
+                * augment both sides (and fill in dummy values for the (::) case *)
+                ( (List.rev_append pinit ps, s, e) :: mnil
+                , (List.rev_append pinit (Ast.PIgn :: Ast.PIgn :: ps), s, e) :: mcons
+                )
+              | [], Ast.PNil :: ps ->
+                ((List.rev_append pinit ps, s, e) :: mnil, mcons)
+              | [], Ast.PCons (hd, tl) :: ps ->
+                (mnil, (List.rev_append pinit (hd :: tl :: ps), s, e) :: mcons)
+              | [], Ast.PVar (n, p) :: ps ->
+                coiter pinit (M.add n v s) ([], p :: ps)
+              | _ :: xs, p :: ps ->
+                coiter (p :: pinit) s (xs, ps)
+              | _ -> failwith "PATTERN MATRIX DIMENSION MISMATCH" in
+            coiter [] s (vinit, p)) rows ([], []) in
+
+          let knil, id = id, id + 1 in
+          let kcons, id = id, id + 1 in
+          let ext1, id = id, id + 1 in
+          let ext2, id = id, id + 1 in
+          let (id, tnil) = lower_case (List.rev_append vinit vs) id mnil h k in
+          let (id, tcons) = lower_case (List.rev_append vinit (ext1 :: ext2 :: vs)) id mcons h k in
+
+          (id, LetCont ([knil, [], ref tnil], ref (
+                LetCont ([kcons, [ext1; ext2], ref tcons], ref (
+                  Case (v, Hir.M.singleton (Some 0) knil
+                            |> Hir.M.add (Some 1) kcons))))))
         | v :: vs, Ast.PVar (n, p) :: ps ->
           loop vinit pinit (M.add n v s) (v :: vs, p :: ps)
         | v :: vs, p :: ps ->
