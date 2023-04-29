@@ -15,6 +15,9 @@ and datadef =
 
 type fvmap = t ref IdMap.t
 
+let datadef_Void : datadef =
+  ("Void", [], Hashtbl.create 0)
+
 let new_tyvar : unit -> t =
   let fresh_id = ref Z.zero in
   fun () ->
@@ -45,6 +48,19 @@ let inst (t : t) : t =
             Hashtbl.add map k v;
             v in
   walk t
+
+let rec subst (m : t IdMap.t) (t : t) : t =
+  let t = unwrap_shallow t in
+  match t with
+    | _ when IdMap.is_empty m -> t
+    | TyVar _ -> t
+    | TyArr (a, r) -> TyArr (subst m a, subst m r)
+    | TyTup xs -> TyTup (List.map (subst m) xs)
+    | TyDat (k, xs) -> TyDat (k, List.map (subst m) xs)
+    | TyPly id ->
+      match IdMap.find_opt id m with
+        | Some t -> t
+        | None -> t
 
 let rec collect_free (t : t) (m : fvmap) : fvmap =
   match unwrap_shallow t with

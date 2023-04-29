@@ -28,7 +28,9 @@ expr:
   | e = expr_cons { e }
 
 expr_cons:
-  | hd = expr_app; CONS; tl = expr_cons { ECons (hd, tl) }
+  | hd = expr_app; CONS; tl = expr_cons {
+    ECons ("::", ref Type.datadef_Void, [hd; tl])
+  }
   | e = expr_app { e }
 
 binders:
@@ -46,14 +48,18 @@ case:
   | p = pattern ARROW e = expr { (p, e) }
 
 pattern:
-  | hd = pattern_atom; CONS; tl = pattern { PCons (hd, tl) }
+  | hd = pattern_atom; CONS; tl = pattern {
+    PDecons ("::", ref Type.datadef_Void, [hd; tl])
+  }
   | p = pattern_atom { p }
 
 pattern_atom:
   | LPAREN; e = pattern; RPAREN { e }
   | LCURLY; e = patterns; RCURLY { PTup e }
   | LSQUARE; e = patterns; RSQUARE {
-    List.fold_right (fun hd tl -> PCons (hd, tl)) e PNil
+    let tl = PDecons ("[]", ref Type.datadef_Void, []) in
+    List.fold_right (fun hd tl ->
+      PDecons ("::", ref Type.datadef_Void, [hd; tl])) e tl
   }
   | IGNORE { PIgn }
   | n = IDENT { PVar (n, PIgn) }
@@ -72,7 +78,9 @@ expr_atom:
   | LPAREN; e = expr; RPAREN { e }
   | LCURLY; e = exprs; RCURLY { ETup e }
   | LSQUARE; e = exprs; RSQUARE {
-    List.fold_right (fun hd tl -> ECons (hd, tl)) e ENil
+    let tl = ECons ("[]", ref Type.datadef_Void, []) in
+    List.fold_right (fun hd tl ->
+      ECons ("::", ref Type.datadef_Void, [hd; tl])) e tl
   }
   | e = IDENT { EVar e }
 

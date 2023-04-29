@@ -4,12 +4,19 @@ open Hir
 
 module M = Map.Make (String)
 
+let datadef_table = Hashtbl.create 64
+let register_ctors (d : Type.datadef) : unit =
+  let (_, _, q) = d in
+  Hashtbl.iter (fun k (_, args) ->
+    Hashtbl.add datadef_table k (d, args)) q
+
 let datadef_List =
   let open Type in
   let m = Hashtbl.create 2 in
   let self = ("List", [Z.zero], m) in
   Hashtbl.add m "[]" (0, []);
   Hashtbl.add m "::" (1, [TyPly Z.zero; (TyDat (self, [TyPly Z.zero]))]);
+  register_ctors self;
   self
 
 let env_collect_free (s : Type.t M.t) =
@@ -28,15 +35,27 @@ let rec check' s = function
   | Ast.ETup xs ->
     TyTup (List.map (check' s) xs)
 
-  | Ast.ENil ->
-    let eltty = Type.new_tyvar () in
-    TyDat (datadef_List, [eltty])
+  | Ast.ECons (k, dinfo, args) ->
+    let (d, params) = match Hashtbl.find_opt datadef_table k with
+      | Some q -> q
+      | None -> failwith ("Unrecognized data constructor " ^ k) in
 
-  | Ast.ECons (hd, tl) ->
-    let eltty = check' s hd in
-    let lstty = check' s tl in
-    Type.unify lstty (TyDat (datadef_List, [eltty]));
-    lstty
+    let (_, polys, _) = d in
+    let (targs, penv) = List.fold_right (fun p (xs, penv) ->
+      let t = Type.new_tyvar () in
+      (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
+
+    let rec loop s = function
+      | [], [] ->
+        dinfo := d;
+        Type.TyDat (d, targs)
+      | param :: xs, arg :: ys ->
+        let arg = check' s arg in
+        let param = Type.subst penv param in
+        Type.unify arg param;
+        loop s (xs, ys)
+      | _ -> failwith "Data constructor argument length mismatch" in
+    loop s (params, args)
 
   | Ast.ELam ([], _) ->
     failwith "INVALID ELAM NODE"
@@ -123,15 +142,27 @@ and check_pat' s = function
       (s, p :: acc)) (s, []) xs in
     (s, TyTup (List.rev xs))
 
-  | Ast.PNil ->
-    let eltty = Type.new_tyvar () in
-    (s, TyDat (datadef_List, [eltty]))
+  | Ast.PDecons (k, dinfo, args) ->
+    let (d, params) = match Hashtbl.find_opt datadef_table k with
+      | Some q -> q
+      | None -> failwith ("Unrecognized data constructor " ^ k) in
 
-  | Ast.PCons (hd, tl) ->
-    let (s, eltty) = check_pat' s hd in
-    let (s, lstty) = check_pat' s tl in
-    Type.unify lstty (TyDat (datadef_List, [eltty]));
-    (s, lstty)
+    let (_, polys, _) = d in
+    let (targs, penv) = List.fold_right (fun p (xs, penv) ->
+      let t = Type.new_tyvar () in
+      (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
+
+    let rec loop s = function
+      | [], [] ->
+        dinfo := d;
+        (s, Type.TyDat (d, targs))
+      | param :: xs, arg :: ys ->
+        let (s, arg) = check_pat' s arg in
+        let param = Type.subst penv param in
+        Type.unify arg param;
+        loop s (xs, ys)
+      | _ -> failwith "Data constructor argument length mismatch" in
+    loop s (params, args)
 
 and check_pat p =
   check_pat' M.empty p
@@ -176,17 +207,16 @@ let rec lower_funk e id s h k =
           (id, LetPack (name, List.rev acc, ref tail)) in
       loop id [] xs
 
-    | Ast.ENil ->
-      let name, id = id, id + 1 in
-      let (id, term) = k id name in
-      (id, LetCons (name, 0, [], ref term))
-
-    | Ast.ECons (hd, tl) ->
-      lower_funk hd id s h (fun id hd ->
-        lower_funk tl id s h (fun id tl ->
+    | Ast.ECons (ctor, { contents = (_, _, mapping) }, args) ->
+      let rec loop id acc = function
+        | x :: xs ->
+          lower_funk x id s h (fun id x -> loop id (x :: acc) xs)
+        | [] ->
           let name, id = id, id + 1 in
-          let (id, term) = k id name in
-          (id, LetCons (name, 1, [hd; tl], ref term))))
+          let id, tail = k id name in
+          let (slot, _) = Hashtbl.find mapping ctor in
+          (id, LetCons (name, slot, List.rev acc, ref tail)) in
+      loop id [] args
 
     | Ast.EApp (f, xs) ->
       let rec loop id acc = function
@@ -307,47 +337,74 @@ and lower_case v id cases h k =
                 (i + 1, LetProj (start + i, i, scrut, ref term))) (0, term) elts in
               (id, term) in
           spec id [] [] [] elts
-        | v :: vs, (Ast.PNil | Ast.PCons _) :: _ ->
-          (* Transform:
-           *   case v of [] -> e
-           * to:
-           *   case v of [] -> e, _ -> ...
+        | v :: vs, Ast.PDecons (_, { contents = (_, _, max_ctors) }, _) :: _ ->
+          (* assume the variant type has data constructors k1 to kN, then
+           * what we in essence is specialize the case over every possible
+           * constructor.
            *
-           * Transform:
-           *   case v of p1 :: p2 -> e
-           * to:
-           *   case v of p1 :: u -> (case u of p2 -> e), _ -> ... *)
-
-          let (mnil, mcons) = List.fold_right (fun (p, s, e) (mnil, mcons) ->
+           * in practice, we specialize over every constructor that appears
+           * in this column. if there are cases not covered, then we emit a
+           * default case. *)
+          let partitions = Hashtbl.create 32 in
+          let split_rows = List.map (fun (p, s, e) ->
             let rec coiter pinit s = function
-              | [], Ast.PIgn :: ps ->
-                (* since it's ignored, it could match both (::) and [], so need to
-                * augment both sides (and fill in dummy values for the (::) case *)
-                ( (List.rev_append pinit ps, s, e) :: mnil
-                , (List.rev_append pinit (Ast.PIgn :: Ast.PIgn :: ps), s, e) :: mcons
-                )
-              | [], Ast.PNil :: ps ->
-                ((List.rev_append pinit ps, s, e) :: mnil, mcons)
-              | [], Ast.PCons (hd, tl) :: ps ->
-                (mnil, (List.rev_append pinit (hd :: tl :: ps), s, e) :: mcons)
+              | [], (Ast.PIgn :: _ as ps) ->
+                (pinit, ps, s, e)
+              | [], (Ast.PDecons (ctor, _, args) :: _ as ps) ->
+                Hashtbl.replace partitions ctor (lazy (
+                  List.rev_map (fun _ -> Ast.PIgn) args));
+                (pinit, ps, s, e)
               | [], Ast.PVar (n, p) :: ps ->
                 coiter pinit (M.add n v s) ([], p :: ps)
               | _ :: xs, p :: ps ->
                 coiter (p :: pinit) s (xs, ps)
               | _ -> failwith "PATTERN MATRIX DIMENSION MISMATCH" in
-            coiter [] s (vinit, p)) rows ([], []) in
+            coiter [] s (vinit, p)) rows in
 
-          let knil, id = id, id + 1 in
-          let kcons, id = id, id + 1 in
-          let ext1, id = id, id + 1 in
-          let ext2, id = id, id + 1 in
-          let (id, tnil) = lower_case (List.rev_append vinit vs) id mnil h k in
-          let (id, tcons) = lower_case (List.rev_append vinit (ext1 :: ext2 :: vs)) id mcons h k in
+          let m =
+            if Hashtbl.length partitions = Hashtbl.length max_ctors then
+              Hir.M.empty
+            else begin
+              (* need to emit the default case *)
+              let m = List.fold_right (fun (pinit, ps, s, e) acc ->
+                match ps with
+                  | Ast.PIgn :: ps -> (List.rev_append pinit ps, s, e) :: acc
+                  | _ -> acc) split_rows [] in
+              Hir.M.singleton None ([], m)
+            end in
+          let m = List.fold_right (fun (pinit, ps, s, e) m ->
+            match ps with
+              | Ast.PIgn :: ps ->
+                Hashtbl.fold (fun ctor fill m ->
+                  let (slot, _) = Hashtbl.find max_ctors ctor in
+                  let args = Lazy.force fill in
+                  let row = ps
+                    |> List.rev_append args
+                    |> List.rev_append pinit, s, e in
+                  Hir.M.update (Some slot) (function
+                    | None -> Some (args, [row])
+                    | Some (p, xs) -> Some (p, row :: xs)) m) partitions m
+              | Ast.PDecons (ctor, _, args) :: ps ->
+                let (slot, _) = Hashtbl.find max_ctors ctor in
+                let row = List.rev_append pinit (args @ ps), s, e in
+                Hir.M.update (Some slot) (function
+                  | None -> Some (args, [row])
+                  | Some (p, xs) -> Some (p, row :: xs)) m
+              | _ -> failwith "PATTERN MATRIX DIMENSION MISMATCH") split_rows m in
 
-          (id, LetCont ([knil, [], ref tnil], ref (
-                LetCont ([kcons, [ext1; ext2], ref tcons], ref (
-                  Case (v, Hir.M.singleton (Some 0) knil
-                            |> Hir.M.add (Some 1) kcons))))))
+          let case_anchor = ref (Export []) in
+          let (id, tail, m) = Hir.M.fold (fun slot (args, matrix) (id, tail, m) ->
+            let label, id = id, id + 1 in
+            let args, id = List.fold_left (fun (args, id) _ ->
+              let arg, id = id, id + 1 in
+              (arg :: args, id)) ([], id) args in
+            let vs = vs |> List.rev_append args |> List.rev_append vinit in
+            let (id, term) = lower_case vs id matrix h k in
+            let tail = ref (LetCont ([label, List.rev args, ref term], tail)) in
+            (id, tail, Hir.M.add slot label m)) m (id, case_anchor, Hir.M.empty) in
+
+          case_anchor := Case (v, m);
+          (id, !tail)
         | v :: vs, Ast.PVar (n, p) :: ps ->
           loop vinit pinit (M.add n v s) (v :: vs, p :: ps)
         | v :: vs, p :: ps ->
