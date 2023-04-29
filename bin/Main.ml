@@ -106,7 +106,8 @@ let () =
     | Ok (Some m) ->
       match Sem.check m with
         | Error e -> print_endline e
-        | Ok _ ->
+        | Ok t ->
+          print_endline (Type.to_string t);
           match Sem.lower m with
             | Error e -> print_endline e
             | Ok m -> transform_program m |> ignore

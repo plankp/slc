@@ -4,164 +4,38 @@ open Hir
 
 module M = Map.Make (String)
 
-type typ =
-  | TyVar of
-    { mutable key : Z.t
-    ; mutable typ : typ
-    }
-  | TyPly of Z.t
-  | TyArr of typ * typ
-  | TyTup of typ list
-  | TyDat of datadef * typ list
-
-and datadef =
-  Z.t list * (string, int * typ list) Hashtbl.t
-
 let datadef_List =
+  let open Type in
   let m = Hashtbl.create 2 in
-  let self = ([Z.zero], m) in
+  let self = ("List", [Z.zero], m) in
   Hashtbl.add m "[]" (0, []);
   Hashtbl.add m "::" (1, [TyPly Z.zero; (TyDat (self, [TyPly Z.zero]))]);
   self
 
-let new_tyvar () : typ =
-  let rec typ = TyVar { typ; key = Z.zero } in
-  typ
-
-let rec unwrap_shallow : typ -> typ = function
-  | TyVar ({ typ; _ } as r) as q when q != typ ->
-    let typ = unwrap_shallow typ in
-    r.typ <- typ;
-    typ
-  | t -> t
-
-let occurs_in (q : typ) (t : typ) : bool =
-  let rec loop = function
-    | [] -> false
-    | x :: xs ->
-      let x = unwrap_shallow x in
-      match x with
-        | _ when x == q -> true
-        | TyVar _ | TyPly _ -> loop xs
-        | TyArr (a, r) -> loop (a :: r :: xs)
-        | TyTup ys | TyDat (_, ys) ->
-          if loop ys then true else loop xs in
-  loop [t]
-
-let unify (a : typ) (b : typ) : unit =
-  let rec loop = function
-    | [] -> ()
-    | (a, b) :: xs ->
-      let a = unwrap_shallow a in
-      let b = unwrap_shallow b in
-      match a, b with
-        | TyVar r, TyVar _ ->
-          if a != b then r.typ <- b;
-          loop xs
-        | (TyVar r as a), b | b, (TyVar r as a) ->
-          if occurs_in a b then failwith "Illegal infinite type construction";
-          r.typ <- b;
-          loop xs
-
-        | TyPly a, TyPly b when Z.Compare.(a = b) ->
-          loop xs
-
-        | TyArr (a1, r1), TyArr (a2, r2) ->
-          loop ((a1, a2) :: (r1, r2) :: xs)
-
-        | TyTup e1, TyTup e2 ->
-          loop_tail xs e1 e2
-
-        | TyDat (k1, e1), TyDat (k2, e2) when k1 == k2 ->
-          loop_tail xs e1 e2
-
-        | _ -> failwith "Impossible type unification"
-  and loop_tail xs x y =
-    let xs = try
-      List.fold_left2 (fun acc x y -> (x, y) :: acc) xs x y
-    with _ -> failwith "Impossible type unification" in
-    loop xs in
-  loop [(a, b)]
-
-let inst (a : typ) : typ =
-  let map = Hashtbl.create 16 in
-  let rec walk = function
-    | TyArr (a, r) -> TyArr (walk a, walk r)
-    | TyTup xs -> TyTup (List.map walk xs)
-    | TyDat (k, xs) -> TyDat (k, List.map walk xs)
-    | TyVar _ as t -> t
-    | TyPly k ->
-      match Hashtbl.find_opt map k with
-        | Some v -> v
-        | None ->
-          let v = new_tyvar () in
-          Hashtbl.add map k v;
-          v in
-  walk a
-
-let collect_free (s : typ M.t) =
-  let map = Hashtbl.create 32 in
-  let rec fold_free t v =
-    let t = unwrap_shallow t in
-    match t with
-      | TyPly _ -> v
-      | TyArr (a, r) -> v |> fold_free a |> fold_free r
-      | TyTup xs | TyDat (_, xs) ->
-        List.fold_left (fun v t -> fold_free t v) v xs
-      | TyVar ({ key; _ } as r) ->
-        match Hashtbl.find_opt map key with
-          | Some q when q == t -> v
-          | _ ->
-            r.key <- v;
-            Hashtbl.add map v t;
-            Z.succ v in
-  let _ = M.fold (fun _ t v -> fold_free t v) s Z.zero in
-  map
+let env_collect_free (s : Type.t M.t) =
+  M.fold (fun _ -> Type.collect_free) s Type.IdMap.empty
 
 let gen s t =
-  let mmap = collect_free s in
-  let next_id = ref Z.zero in
-  let pmap = Hashtbl.create 8 in
-  let rec walk t =
-    let t = unwrap_shallow t in
-    match t with
-      | TyPly _ -> failwith "Invalid poly type"
-      | TyArr (a, r) -> TyArr (walk a, walk r)
-      | TyTup xs -> TyTup (List.map walk xs)
-      | TyDat (k, xs) -> TyDat (k, List.map walk xs)
-      | TyVar ({ key; _ } as r) ->
-        match Hashtbl.find_opt mmap key with
-          | Some q when q == t -> t (* not free *)
-          | _ ->
-            (* generalize it *)
-            match Hashtbl.find_opt pmap key with
-              | Some (q, p) when q == t -> p
-              | _ ->
-                let id = !next_id in
-                r.key <- id;
-                next_id := Z.succ id;
-                Hashtbl.add pmap id (t, TyPly id);
-                TyPly id in
-  walk t
+  Type.gen (env_collect_free s) t
 
 let rec check' s = function
   | Ast.EVar n -> begin
     match M.find_opt n s with
       | None -> failwith ("Name " ^ n ^ " not found")
-      | Some t -> inst t
+      | Some t -> Type.inst t
   end
 
   | Ast.ETup xs ->
     TyTup (List.map (check' s) xs)
 
   | Ast.ENil ->
-    let eltty = new_tyvar () in
+    let eltty = Type.new_tyvar () in
     TyDat (datadef_List, [eltty])
 
   | Ast.ECons (hd, tl) ->
     let eltty = check' s hd in
     let lstty = check' s tl in
-    unify lstty (TyDat (datadef_List, [eltty]));
+    Type.unify lstty (TyDat (datadef_List, [eltty]));
     lstty
 
   | Ast.ELam ([], _) ->
@@ -173,25 +47,25 @@ let rec check' s = function
       (s, p :: acc)) (M.empty, []) ps in
     let s = M.union (fun _ _ v -> Some v) s env in
     let ty = check' s e in
-    List.fold_left (fun r a -> TyArr (a, r)) ty args
+    List.fold_left (fun r a -> Type.TyArr (a, r)) ty args
 
   | Ast.ELamCase xs ->
-    let valty = new_tyvar () in
-    let resty = new_tyvar () in
+    let valty = Type.new_tyvar () in
+    let resty = Type.new_tyvar () in
     List.iter (fun (p, e) ->
       let (binds, ty) = check_pat p in
-      unify valty ty;
+      Type.unify valty ty;
       let s = M.union (fun _ _ t -> Some t) s binds in
       let ty = check' s e in
-      unify resty ty) xs;
+      Type.unify resty ty) xs;
     TyArr (valty, resty)
 
   | Ast.EApp (f, xs) ->
     let funty = check' s f in
     List.fold_left (fun funty a ->
       let argty = check' s a in
-      let resty = new_tyvar () in
-      unify funty (TyArr (argty, resty));
+      let resty = Type.new_tyvar () in
+      Type.unify funty (TyArr (argty, resty));
       resty) funty xs
 
   | Ast.ELet (b, e) ->
@@ -210,31 +84,31 @@ let rec check' s = function
     let s' = List.fold_left (fun s' (n, _) ->
       if Hashtbl.mem mapping n then
         failwith "Illegal duplicate binding in same level";
-      let recty = new_tyvar () in
+      let recty = Type.new_tyvar () in
       Hashtbl.add mapping n recty;
       M.add n recty s') s b in
     let s = b
       |> List.map (fun (n, i) ->
           let t1 = check' s' i in
           let t2 = Hashtbl.find mapping n in
-          unify t1 t2;
+          Type.unify t1 t2;
           (n, t1))
       |> List.fold_left (fun s' (n, t) -> M.add n (gen s t) s') s in
     check' s e
 
   | Ast.ECase (e, xs) ->
     let valty = check' s e in
-    let resty = new_tyvar () in
+    let resty = Type.new_tyvar () in
     List.iter (fun (p, e) ->
       let (binds, ty) = check_pat p in
-      unify valty ty;
+      Type.unify valty ty;
       let s = M.union (fun _ _ t -> Some t) s binds in
       let ty = check' s e in
-      unify resty ty) xs;
+      Type.unify resty ty) xs;
     resty
 
 and check_pat' s = function
-  | Ast.PIgn -> (s, new_tyvar ())
+  | Ast.PIgn -> (s, Type.new_tyvar ())
 
   | Ast.PVar (n, p) -> begin
     let (s, ty) = check_pat' s p in
@@ -250,13 +124,13 @@ and check_pat' s = function
     (s, TyTup (List.rev xs))
 
   | Ast.PNil ->
-    let eltty = new_tyvar () in
+    let eltty = Type.new_tyvar () in
     (s, TyDat (datadef_List, [eltty]))
 
   | Ast.PCons (hd, tl) ->
     let (s, eltty) = check_pat' s hd in
     let (s, lstty) = check_pat' s tl in
-    unify lstty (TyDat (datadef_List, [eltty]));
+    Type.unify lstty (TyDat (datadef_List, [eltty]));
     (s, lstty)
 
 and check_pat p =
