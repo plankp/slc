@@ -83,6 +83,12 @@ let transform_program program =
   print_endline "";
   print_endline "";
 
+  print_endline "Arity";
+  PassArity.transform program;
+  Hir.dump program;
+  print_endline "";
+  print_endline "";
+
   print_endline "Contification";
   PassContify.transform program;
   Hir.dump program;
