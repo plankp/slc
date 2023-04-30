@@ -71,35 +71,29 @@ let program =
 
 open Slc
 
+module type Transform = sig
+  val transform : Hir.term -> unit
+end
+
 let transform_program program =
+  let transforms : (string * (module Transform)) list =
+    [ "Fixrec", (module PassFixrec)
+    ; "Arity", (module PassArity)
+    ; "Contification", (module PassContify)
+    ; "Closure Conversion", (module PassCC)
+    ] in
+
   print_endline "Original";
   Hir.dump program;
   print_endline "";
   print_endline "";
 
-  print_endline "Fixrec";
-  PassFixrec.transform program;
-  Hir.dump program;
-  print_endline "";
-  print_endline "";
-
-  print_endline "Arity";
-  PassArity.transform program;
-  Hir.dump program;
-  print_endline "";
-  print_endline "";
-
-  print_endline "Contification";
-  PassContify.transform program;
-  Hir.dump program;
-  print_endline "";
-  print_endline "";
-
-  print_endline "Closure Conversion";
-  PassCC.transform program;
-  Hir.dump program;
-  print_endline "";
-  print_endline "";
+  List.iter (fun (name, (module T : Transform)) ->
+    print_endline name;
+    T.transform program;
+    Hir.dump program;
+    print_endline "";
+    print_endline "") transforms;
 
   print_endline "Lower to C";
   PassLower.lower program
