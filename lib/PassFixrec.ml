@@ -50,75 +50,111 @@ let compute_levels (g : 'a vertex M.t) : 'a vertex list list =
   M.iter (fun _ v -> if v.index = None then connect v) g;
   !rebuild
 
-let rec transform r = match !r with
+let rec transform s r = match !r with
   | Module _ ->
     failwith "INVALID NESTED MODULE"
 
   | Export xs ->
-    List.fold_left (fun s (_, v) -> S.add v s) S.empty xs
+    List.fold_left (fun s (_, v) -> S.add v s) s xs
 
-  | LetCont (bs, e) ->
-    (* we only care about functions due to their capturing semantics *)
-    let s = transform e in
-    List.fold_left (fun s (_, args, body) ->
-      let p = transform body in
-      let p = List.fold_left (fun p v -> S.remove v p) p args in
-      S.union p s) s bs
+  | Jmp (k, args) ->
+    List.fold_left (fun s v -> S.add v s) s (k :: args)
 
-  | LetFun ((f, args, _, _, body), e) ->
-    (* we only care about recursive ones *)
-    let s = transform body in
-    let s = List.fold_left (fun s v -> S.remove v s) s args in
-    transform e |> S.remove f |> S.union s
+  | App (f, args, k, h) ->
+    List.fold_left (fun s v -> S.add v s) s (f :: k :: h :: args)
 
-  | Jmp (_, args) ->
-    List.fold_left (fun s v -> S.add v s) S.empty args
+  | Case (v, cases) ->
+    s |> S.add v |> Hir.M.fold (fun _ -> S.add) cases
 
-  | App (f, args, _, _) ->
-    List.fold_left (fun s v -> S.add v s) S.empty (f :: args)
+  | LetFun ((f, _, _, _, body), next) ->
+    let s = transform s next in
+    if S.mem f s then
+      transform s body
+    else begin
+      r := !next; s
+    end
 
-  | Case (v, _) ->
-    S.singleton v
+  | LetPack (v, elts, next) | LetCons (v, _, elts, next) ->
+    let s = transform s next in
+    if S.mem v s then
+      List.fold_left (fun s v -> S.add v s) s elts
+    else begin
+      r := !next; s
+    end
 
-  | LetPack (v, elts, e) | LetCons (v, _, elts, e) ->
-    let s = transform e in
-    let s = S.remove v s in
-    List.fold_left (fun s v -> S.add v s) s elts
+  | LetProj (v, _, t, next) ->
+    let s = transform s next in
+    if S.mem v s then
+      S.add t s
+    else begin
+      r := !next; s
+    end
 
-  | LetProj (v, _, t, e) ->
-    transform e |> S.remove v |> S.add t
+  | LetRec (bs, next) ->
+    let (defs, fvs) = List.fold_left (fun (defs, xs) info ->
+      let (f, _, _, _, next) = info in
+      let s = transform S.empty next in
+      (S.add f defs, (info, s) :: xs)) (S.empty, []) bs in
 
-  | LetRec (bs, e) ->
-    let fvs = List.map (fun (_, args, _, _, body) ->
-      let s = transform body in
-      List.fold_left (fun s v -> S.remove v s) s args) bs in
-
-    let defs = List.fold_left (fun s (f, _, _, _, _) ->
-      S.add f s) S.empty bs in
-
-    (* build the dependency graph of the letrec bindings *)
-    let g = List.fold_left2 (fun g ((f, _, _, _, _) as info) deps ->
+    (* build the dependency graph of the bindings *)
+    let g = List.fold_left (fun g (info, fvs) ->
+      let (f, _, _, _, _) = info in
       let v =
-        { info; deps = S.inter deps defs
+        { info = (info, fvs); deps = S.inter fvs defs
         ; index = None; lowlink = ~-1; onstack = false } in
-      M.add f v g) M.empty bs fvs in
+      M.add f v g) M.empty fvs in
 
-    let s = transform e in
-    let s = List.fold_left S.union s fvs in
-    let s = S.diff s defs in
-
-    (* here we do the rewrite inside out *)
+    let s = transform s next in
     let rebuild = compute_levels g in
-    r := List.fold_left (fun e scc ->
-      match scc with
-        | [{ info = (f, _, _, _, _) as fv; deps; _ }] when not (S.mem f deps) ->
-          LetFun (fv, ref e)
-        | _ ->
-          LetRec (List.map (fun v -> v.info) scc, ref e)) !e rebuild;
+    let (s, e) = List.fold_left (fun (s, e) scc ->
+      let is_dead = not @@ List.exists (fun { info = (info, _); _ } ->
+        let (f, _, _, _, _) = info in S.mem f s) scc in
+      if is_dead then (s, e)
+      else begin
+        match scc with
+          | [{ info = ((f, _, _, _, _) as info, fv); deps; _ }]
+            when not (S.mem f deps) ->
+            (S.union fv s, LetFun (info, ref e))
+          | _ ->
+            let (s, bs) = List.fold_left (fun (s, xs) { info; _ } ->
+              let (info, fv) = info in
+              (S.union fv s, info :: xs)) (s, []) scc in
+            (s, LetRec (bs, ref e))
+      end) (s, !next) rebuild in
+    r := e;
+    s
+
+  | LetCont (bs, next) ->
+    let (defs, fvs) = List.fold_left (fun (defs, xs) info ->
+      let (j, _, next) = info in
+      let s = transform S.empty next in
+      (S.add j defs, (info, s) :: xs)) (S.empty, []) bs in
+
+    (* build the dependency graph of the bindings *)
+    let g = List.fold_left (fun g (info, fvs) ->
+      let (j, _, _) = info in
+      let v =
+        { info = (info, fvs); deps = S.inter fvs defs
+        ; index = None; lowlink = ~-1; onstack = false } in
+      M.add j v g) M.empty fvs in
+
+    let s = transform s next in
+    let rebuild = compute_levels g in
+    let (s, e) = List.fold_left (fun (s, e) scc ->
+      let is_dead = not @@ List.exists (fun { info = (info, _); _ } ->
+        let (j, _, _) = info in S.mem j s) scc in
+      if is_dead then (s, e)
+      else begin
+        let (s, bs) = List.fold_left (fun (s, xs) { info; _ } ->
+          let (info, fv) = info in
+          (S.union fv s, info :: xs)) (s, []) scc in
+        (s, LetCont (bs, ref e))
+      end) (s, !next) rebuild in
+    r := e;
     s
 
 let transform e =
   let _ = PassReindex.reindex e in
   match e with
-    | Module (_, _, r) -> transform r |> ignore
+    | Module (_, _, r) -> transform S.empty r |> ignore
     | _ -> failwith "INVALID TERM ANCHOR"
