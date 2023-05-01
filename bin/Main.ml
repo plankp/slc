@@ -78,7 +78,6 @@ end
 let transform_program program =
   let transforms : (string * (module Transform)) list =
     [ "Simplify", (module PassSimplify)
-    ; "Fixrec", (module PassFixrec)
     ; "Arity", (module PassArity)
     ; "Simplify", (module PassSimplify)
     ; "Contification", (module PassContify)

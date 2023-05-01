@@ -31,7 +31,8 @@ let compute_levels (g : 'a vertex M.t) : 'a vertex list list =
           connect w;
           v.lowlink <- min v.lowlink w.lowlink
         | Some w_index ->
-          v.lowlink <- min v.lowlink w_index) v.deps;
+          if w.onstack then
+            v.lowlink <- min v.lowlink w_index) v.deps;
 
     if Some v.lowlink = v.index then begin
       let rec loop scc =

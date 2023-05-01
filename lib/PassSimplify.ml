@@ -257,7 +257,7 @@ let rec redux env r = match !r with
     redux env next
 
 let transform e =
-  let _ = PassReindex.reindex e in
+  PassFixrec.transform e;
   match e with
     | Module (_, _, r) ->
       let v = collect_occ M.empty r in
