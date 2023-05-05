@@ -39,18 +39,24 @@ let group_binders b =
           end
           | _ -> failwith "INVALID BINDER GROUP STATE") m) b M.empty
 
-let rec check' s = function
+let rec check' sval styp = function
   | Ast.EVar n -> begin
-    match M.find_opt n s with
+    match M.find_opt n sval with
       | Some (Value t) -> Type.inst t
       | _ -> failwith ("Name " ^ n ^ " not found")
   end
 
+  | Ast.ETyped (e, t) ->
+    let t = eval_texpr styp t in
+    let e = check' sval styp e in
+    Type.unify e t;
+    t
+
   | Ast.ETup xs ->
-    TyTup (List.map (check' s) xs)
+    TyTup (List.map (check' sval styp) xs)
 
   | Ast.ECons (k, dinfo, args) ->
-    let (d, params) = match M.find_opt k s with
+    let (d, params) = match M.find_opt k sval with
       | Some (Ctor q) -> q
       | _ -> failwith ("Unrecognized data constructor " ^ k) in
 
@@ -59,90 +65,90 @@ let rec check' s = function
       let t = Type.new_tyvar () in
       (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
 
-    let rec loop s = function
+    let rec loop = function
       | [], [] ->
         dinfo := d;
         Type.TyDat (d, targs)
       | param :: xs, arg :: ys ->
-        let arg = check' s arg in
+        let arg = check' sval styp arg in
         let param = Type.subst penv param in
         Type.unify arg param;
-        loop s (xs, ys)
+        loop (xs, ys)
       | _ -> failwith "Data constructor argument length mismatch" in
-    loop s (params, args)
+    loop (params, args)
 
   | Ast.ELam ([], _) ->
     failwith "INVALID ELAM NODE"
 
   | Ast.ELam (ps, e) ->
-    check_generalized_lambda s [ps, e]
+    check_generalized_lambda sval styp [ps, e]
 
   | Ast.ELamCase xs ->
-    xs |> List.map (fun (p, e) -> ([p], e)) |> check_generalized_lambda s
+    xs |> List.map (fun (p, e) -> ([p], e)) |> check_generalized_lambda sval styp
 
   | Ast.EApp (f, xs) ->
-    let funty = check' s f in
+    let funty = check' sval styp f in
     List.fold_left (fun funty a ->
-      let argty = check' s a in
+      let argty = check' sval styp a in
       let resty = Type.new_tyvar () in
       Type.unify funty (TyArr (argty, resty));
       resty) funty xs
 
   | Ast.ELet (b, e) ->
-    let s = check_let_binder s b in
-    check' s e
+    let sval = check_let_binder sval styp b in
+    check' sval styp e
 
   | Ast.ERec (b, e) ->
-    let s = check_rec_binder s b in
-    check' s e
+    let sval = check_rec_binder sval styp b in
+    check' sval styp e
 
   | Ast.ECase (e, xs) ->
-    let valty = check' s e in
+    let valty = check' sval styp e in
     let resty = Type.new_tyvar () in
     List.iter (fun (p, e) ->
-      let (binds, ty) = check_pat M.empty s p in
+      let (binds, ty) = check_pat M.empty sval styp p in
       Type.unify valty ty;
-      let s = M.union (fun _ _ t -> Some t) s binds in
-      let ty = check' s e in
+      let sval = M.union (fun _ _ t -> Some t) sval binds in
+      let ty = check' sval styp e in
       Type.unify resty ty) xs;
     resty
 
-and check_generalized_lambda s cases =
+and check_generalized_lambda sval styp cases =
   let rowty = Type.new_tyvar () in
   List.iter (fun (ps, e) ->
     let (env, args) = List.fold_left (fun (env, acc) p ->
-      let (env, p) = check_pat env s p in
+      let (env, p) = check_pat env sval styp p in
       (env, p :: acc)) (M.empty, []) ps in
-    let s = M.union (fun _ _ v -> Some v) s env in
-    let ty = check' s e in
+    let sval = M.union (fun _ _ v -> Some v) sval env in
+    let ty = check' sval styp e in
     let ty = List.fold_left (fun r a -> Type.TyArr (a, r)) ty args in
     Type.unify ty rowty) cases;
   Type.unwrap_shallow rowty
 
-and check_let_binder s b =
+and check_let_binder sval styp b =
   let g = group_binders b in
-  let g = M.map (check_generalized_lambda s) g in
-  M.fold (fun n t s' -> M.add n (Value (gen s t)) s') g s
+  let g = M.map (check_generalized_lambda sval styp) g in
+  M.fold (fun n t sval' -> M.add n (Value (gen sval t)) sval') g sval
 
-and check_rec_binder s b =
+and check_rec_binder sval styp b =
   let mapping = Hashtbl.create 16 in
   let g = group_binders b in
-  let s' = M.fold (fun n _ s' ->
+  let sval' = M.fold (fun n _ sval' ->
     let recty = Type.new_tyvar () in
     Hashtbl.add mapping n recty;
-    M.add n (Value recty) s') g s in
+    M.add n (Value recty) sval') g sval in
   let g = M.mapi (fun n mat ->
-    let t1 = check_generalized_lambda s' mat in
+    let t1 = check_generalized_lambda sval' styp mat in
     let t2 = Hashtbl.find mapping n in
     Type.unify t1 t2;
     t1) g in
-  M.fold (fun n t s' -> M.add n (Value (gen s t)) s') g s
+  M.fold (fun n t sval' -> M.add n (Value (gen sval t)) sval') g sval
 
-and check_pat acc s = function
+and check_pat acc sval styp = function
   | Ast.PIgn -> (acc, Type.new_tyvar ())
 
   | Ast.PVar (n, p) -> begin
-    let (acc, ty) = check_pat acc s p in
+    let (acc, ty) = check_pat acc sval styp p in
     match M.find_opt n acc with
       | None -> (M.add n (Value ty) acc, ty)
       | _ -> failwith "Illegal duplicate binding in the same pattern"
@@ -150,12 +156,12 @@ and check_pat acc s = function
 
   | Ast.PTup xs ->
     let (acc, xs) = List.fold_left (fun (acc, xs) p ->
-      let (acc, p) = check_pat acc s p in
+      let (acc, p) = check_pat acc sval styp p in
       (acc, p :: xs)) (acc, []) xs in
     (acc, TyTup (List.rev xs))
 
   | Ast.PDecons (k, dinfo, args) ->
-    let (d, params) = match M.find_opt k s with
+    let (d, params) = match M.find_opt k sval with
       | Some (Ctor q) -> q
       | _ -> failwith ("Unrecognized data constructor " ^ k) in
 
@@ -169,7 +175,7 @@ and check_pat acc s = function
         dinfo := d;
         (acc, Type.TyDat (d, targs))
       | param :: xs, arg :: ys ->
-        let (acc, arg) = check_pat acc s arg in
+        let (acc, arg) = check_pat acc sval styp arg in
         let param = Type.subst penv param in
         Type.unify arg param;
         loop acc (xs, ys)
@@ -233,13 +239,13 @@ let check (exports, m) =
   let rec check_module sval styp = function
     | [] -> (sval, styp)
     | Ast.RExpr e :: xs ->
-      let _ = check' sval e in
+      let _ = check' sval styp e in
       check_module sval styp xs
     | Ast.RLet b :: xs ->
-      let sval = check_let_binder sval b in
+      let sval = check_let_binder sval styp b in
       check_module sval styp xs
     | Ast.RRec b :: xs ->
-      let sval = check_rec_binder sval b in
+      let sval = check_rec_binder sval styp b in
       check_module sval styp xs
     | Ast.RData b :: xs ->
       let ctors = check_data_def styp b in
@@ -261,6 +267,8 @@ let check (exports, m) =
 let rec lower_funk e id s h k =
   match e with
     | Ast.EVar n -> k id (M.find n s)
+
+    | Ast.ETyped (e, _) -> lower_funk e id s h k
 
     | Ast.ELet (b, e) ->
       lower_let_binder b id s h (fun id s ->

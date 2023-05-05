@@ -9,6 +9,7 @@ open Ast
 %token DATA BAR
 %token LET REC SET IN AND
 %token CASE OF IGNORE BIND
+%token COLON
 %token EXPORT
 %token <string> LNAME UNAME
 %token EOF
@@ -75,6 +76,7 @@ expr:
   | LET b = binders IN e = expr { ELet (b, e) }
   | REC b = binders IN e = expr { ERec (b, e) }
   | CASE e = expr OF k = cases { ECase (e, k) }
+  | e = expr_cons COLON t = texpr { ETyped (e, t) }
   | e = expr_cons { e }
 
 expr_cons:

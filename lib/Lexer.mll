@@ -23,6 +23,7 @@ rule read = parse
   | '\\'      { SLASH }
   | "->"      { ARROW }
   | "::"      { CONS }
+  | ':'       { COLON }
   | '='       { SET }
   | '|'       { BAR }
   | ','       { COMMA }

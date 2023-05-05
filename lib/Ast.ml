@@ -20,6 +20,7 @@ and expr =
   | ELet of binder list * expr
   | ERec of binder list * expr
   | ECase of expr * (pat * expr) list
+  | ETyped of expr * texpr
 
 and binder =
   string * pat list * expr
