@@ -103,12 +103,10 @@ let () =
   let lexbuf = Lexing.from_channel stdin in
   match Driver.parse Parser.Incremental.prog lexbuf with
     | Error e -> print_endline e
-    | Ok None -> ()
-    | Ok (Some m) ->
+    | Ok m ->
       match Sem.check m with
         | Error e -> print_endline e
-        | Ok t ->
-          print_endline (Type.to_string t);
+        | Ok _ ->
           match Sem.lower m with
             | Error e -> print_endline e
             | Ok m -> transform_program m |> ignore

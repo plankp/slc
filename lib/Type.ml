@@ -18,6 +18,13 @@ type fvmap = t ref IdMap.t
 let datadef_Void : datadef =
   ("Void", [], Hashtbl.create 0)
 
+let datadef_List : datadef =
+  let m = Hashtbl.create 2 in
+  let self = ("List", [Z.zero], m) in
+  Hashtbl.add m "[]" (0, []);
+  Hashtbl.add m "::" (1, [TyPly Z.zero; (TyDat (self, [TyPly Z.zero]))]);
+  self
+
 let new_tyvar : unit -> t =
   let fresh_id = ref Z.zero in
   fun () ->

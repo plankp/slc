@@ -6,18 +6,68 @@ open Ast
 %token LSQUARE RSQUARE CONS
 %token LCURLY RCURLY
 %token SLASH ARROW
-%token LET REC SET IN
+%token DATA BAR
+%token LET REC SET IN AND
 %token CASE OF IGNORE BIND
-%token <string> IDENT
+%token EXPORT
+%token <string> LNAME UNAME
 %token EOF
 
-%start <expr option> prog
+%start <prog> prog
 
 %%
 
 prog:
-  | EOF { None }
-  | e = expr; EOF { Some e }
+  | e = exportdef r = root { (e, r) }
+  | r = root { ([], r) }
+
+exportdef:
+  | EXPORT n = names { n }
+
+names:
+  | x = LNAME COMMA xs = names { x :: xs }
+  | x = LNAME { [x] }
+
+root:
+  | DATA; b = datadefs; xs = root { RData b :: xs }
+  | LET; b = binders; xs = root { RLet b :: xs }
+  | REC; b = binders; xs = root { RRec b :: xs }
+  | LET; IGNORE; SET; e = expr; xs = root { RExpr e :: xs }
+  | EOF { [] }
+
+datadefs:
+  | x = datadef; AND; xs = datadefs { x :: xs }
+  | x = datadef { [x] }
+
+datadef:
+  | n = UNAME; a = LNAME*; SET; BAR?; xs = data_entries { (n, a, xs) }
+
+data_entries:
+  | x = data_entry; BAR; xs = data_entries { x :: xs }
+  | x = data_entry { [x] }
+
+data_entry:
+  | n = UNAME; a = texpr_atom* { (n, a) }
+
+texpr:
+  | a = texpr_app; ARROW; r = texpr { TEArr (a, r) }
+  | e = texpr_app { e }
+
+texpr_app:
+  | k = UNAME; a = texpr_atom+ { TECons (k, a) }
+  | e = texpr_atom { e }
+
+texpr_atom:
+  | LPAREN; e = texpr; RPAREN { e }
+  | LCURLY; e = texprs; RCURLY { TETup e }
+  | LSQUARE; e = texpr; RSQUARE { TECons ("[]", [e]) }
+  | n = LNAME { TEVar n }
+  | n = UNAME { TECons (n, []) }
+
+texprs:
+  | x = texpr; COMMA; xs = texprs { x :: xs }
+  | x = texpr { [x] }
+  | { [] }
 
 expr:
   | SLASH p = pattern+ ARROW e = expr { ELam (p, e) }
@@ -34,11 +84,11 @@ expr_cons:
   | e = expr_app { e }
 
 binders:
-  | x = binder; COMMA; xs = binders { x :: xs }
+  | x = binder; AND; xs = binders { x :: xs }
   | x = binder { [x] }
 
 binder:
-  | n = IDENT SET i = expr { (n, i) }
+  | n = LNAME p = pattern* SET i = expr { (n, p, i) }
 
 cases:
   | x = case; COMMA; xs = cases { x :: xs }
@@ -48,10 +98,14 @@ case:
   | p = pattern ARROW e = expr { (p, e) }
 
 pattern:
-  | hd = pattern_atom; CONS; tl = pattern {
+  | hd = pattern_app; CONS; tl = pattern {
     PDecons ("::", ref Type.datadef_Void, [hd; tl])
   }
-  | p = pattern_atom { p }
+  | p = pattern_app { p }
+
+pattern_app:
+  | k = UNAME; a = pattern_atom+ { PDecons (k, ref Type.datadef_Void, a) }
+  | e = pattern_atom { e }
 
 pattern_atom:
   | LPAREN; e = pattern; RPAREN { e }
@@ -62,8 +116,9 @@ pattern_atom:
       PDecons ("::", ref Type.datadef_Void, [hd; tl])) e tl
   }
   | IGNORE { PIgn }
-  | n = IDENT { PVar (n, PIgn) }
-  | n = IDENT; BIND; p = pattern_atom { PVar (n, p) }
+  | n = UNAME { PDecons (n, ref Type.datadef_Void, []) }
+  | n = LNAME { PVar (n, PIgn) }
+  | n = LNAME; BIND; p = pattern_atom { PVar (n, p) }
 
 patterns:
   | x = pattern; COMMA; xs = patterns { x :: xs }
@@ -71,6 +126,7 @@ patterns:
   | { [] }
 
 expr_app:
+  | k = UNAME; a = expr_atom+ { ECons (k, ref Type.datadef_Void, a) }
   | f = expr_atom; a = expr_atom+ { EApp (f, a) }
   | e = expr_atom { e }
 
@@ -82,7 +138,8 @@ expr_atom:
     List.fold_right (fun hd tl ->
       ECons ("::", ref Type.datadef_Void, [hd; tl])) e tl
   }
-  | e = IDENT { EVar e }
+  | n = UNAME { ECons (n, ref Type.datadef_Void, []) }
+  | e = LNAME { EVar e }
 
 exprs:
   | x = expr; COMMA; xs = exprs { x :: xs }

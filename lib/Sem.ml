@@ -4,41 +4,55 @@ open Hir
 
 module M = Map.Make (String)
 
-let datadef_table = Hashtbl.create 64
-let register_ctors (d : Type.datadef) : unit =
+type ('a, 'b) ventry =
+  | Ctor of 'a
+  | Value of 'b
+
+let register_ctors (d : Type.datadef) s =
   let (_, _, q) = d in
-  Hashtbl.iter (fun k (_, args) ->
-    Hashtbl.add datadef_table k (d, args)) q
+  Hashtbl.fold (fun k (_, args) s ->
+    M.add k (Ctor (d, args)) s) q s
 
-let datadef_List =
-  let open Type in
-  let m = Hashtbl.create 2 in
-  let self = ("List", [Z.zero], m) in
-  Hashtbl.add m "[]" (0, []);
-  Hashtbl.add m "::" (1, [TyPly Z.zero; (TyDat (self, [TyPly Z.zero]))]);
-  register_ctors self;
-  self
-
-let env_collect_free (s : Type.t M.t) =
-  M.fold (fun _ -> Type.collect_free) s Type.IdMap.empty
+let env_collect_free (s : ('a, Type.t) ventry M.t) =
+  M.fold (fun _ v s ->
+    match v with
+      | Value v -> Type.collect_free v s
+      | _ -> s) s Type.IdMap.empty
 
 let gen s t =
   Type.gen (env_collect_free s) t
 
+let group_binders b =
+  List.fold_right (fun (n, p, e) m ->
+    M.update n (function
+      | None -> Some [(p, e)]
+      | Some v ->
+        match v, p with
+          | ([], _) :: _, _ ->
+            failwith "Duplicate name with binding without pattern"
+          | (xs, _) :: _, ys -> begin
+            let () = try
+              List.iter2 (fun _ _ -> ()) xs ys
+            with
+              _ -> failwith "Cannot mix bindings of different argument lengths" in
+            Some ((p, e) :: v)
+          end
+          | _ -> failwith "INVALID BINDER GROUP STATE") m) b M.empty
+
 let rec check' s = function
   | Ast.EVar n -> begin
     match M.find_opt n s with
-      | None -> failwith ("Name " ^ n ^ " not found")
-      | Some t -> Type.inst t
+      | Some (Value t) -> Type.inst t
+      | _ -> failwith ("Name " ^ n ^ " not found")
   end
 
   | Ast.ETup xs ->
     TyTup (List.map (check' s) xs)
 
   | Ast.ECons (k, dinfo, args) ->
-    let (d, params) = match Hashtbl.find_opt datadef_table k with
-      | Some q -> q
-      | None -> failwith ("Unrecognized data constructor " ^ k) in
+    let (d, params) = match M.find_opt k s with
+      | Some (Ctor q) -> q
+      | _ -> failwith ("Unrecognized data constructor " ^ k) in
 
     let (_, polys, _) = d in
     let (targs, penv) = List.fold_right (fun p (xs, penv) ->
@@ -61,23 +75,10 @@ let rec check' s = function
     failwith "INVALID ELAM NODE"
 
   | Ast.ELam (ps, e) ->
-    let (env, args) = List.fold_left (fun (s, acc) p ->
-      let (s, p) = check_pat' s p in
-      (s, p :: acc)) (M.empty, []) ps in
-    let s = M.union (fun _ _ v -> Some v) s env in
-    let ty = check' s e in
-    List.fold_left (fun r a -> Type.TyArr (a, r)) ty args
+    check_generalized_lambda s [ps, e]
 
   | Ast.ELamCase xs ->
-    let valty = Type.new_tyvar () in
-    let resty = Type.new_tyvar () in
-    List.iter (fun (p, e) ->
-      let (binds, ty) = check_pat p in
-      Type.unify valty ty;
-      let s = M.union (fun _ _ t -> Some t) s binds in
-      let ty = check' s e in
-      Type.unify resty ty) xs;
-    TyArr (valty, resty)
+    xs |> List.map (fun (p, e) -> ([p], e)) |> check_generalized_lambda s
 
   | Ast.EApp (f, xs) ->
     let funty = check' s f in
@@ -88,88 +89,173 @@ let rec check' s = function
       resty) funty xs
 
   | Ast.ELet (b, e) ->
-    let mapping = Hashtbl.create 16 in
-    let s = b
-      |> List.map (fun (n, i) ->
-          if Hashtbl.mem mapping n then
-            failwith "Illegal duplicate binding in same level";
-          Hashtbl.add mapping n ();
-          (n, check' s i))
-      |> List.fold_left (fun s' (n, t) -> M.add n (gen s t) s') s in
+    let s = check_let_binder s b in
     check' s e
 
   | Ast.ERec (b, e) ->
-    let mapping = Hashtbl.create 16 in
-    let s' = List.fold_left (fun s' (n, _) ->
-      if Hashtbl.mem mapping n then
-        failwith "Illegal duplicate binding in same level";
-      let recty = Type.new_tyvar () in
-      Hashtbl.add mapping n recty;
-      M.add n recty s') s b in
-    let s = b
-      |> List.map (fun (n, i) ->
-          let t1 = check' s' i in
-          let t2 = Hashtbl.find mapping n in
-          Type.unify t1 t2;
-          (n, t1))
-      |> List.fold_left (fun s' (n, t) -> M.add n (gen s t) s') s in
+    let s = check_rec_binder s b in
     check' s e
 
   | Ast.ECase (e, xs) ->
     let valty = check' s e in
     let resty = Type.new_tyvar () in
     List.iter (fun (p, e) ->
-      let (binds, ty) = check_pat p in
+      let (binds, ty) = check_pat M.empty s p in
       Type.unify valty ty;
       let s = M.union (fun _ _ t -> Some t) s binds in
       let ty = check' s e in
       Type.unify resty ty) xs;
     resty
 
-and check_pat' s = function
-  | Ast.PIgn -> (s, Type.new_tyvar ())
+and check_generalized_lambda s cases =
+  let rowty = Type.new_tyvar () in
+  List.iter (fun (ps, e) ->
+    let (env, args) = List.fold_left (fun (env, acc) p ->
+      let (env, p) = check_pat env s p in
+      (env, p :: acc)) (M.empty, []) ps in
+    let s = M.union (fun _ _ v -> Some v) s env in
+    let ty = check' s e in
+    let ty = List.fold_left (fun r a -> Type.TyArr (a, r)) ty args in
+    Type.unify ty rowty) cases;
+  Type.unwrap_shallow rowty
+
+and check_let_binder s b =
+  let g = group_binders b in
+  let g = M.map (check_generalized_lambda s) g in
+  M.fold (fun n t s' -> M.add n (Value (gen s t)) s') g s
+
+and check_rec_binder s b =
+  let mapping = Hashtbl.create 16 in
+  let g = group_binders b in
+  let s' = M.fold (fun n _ s' ->
+    let recty = Type.new_tyvar () in
+    Hashtbl.add mapping n recty;
+    M.add n (Value recty) s') g s in
+  let g = M.mapi (fun n mat ->
+    let t1 = check_generalized_lambda s' mat in
+    let t2 = Hashtbl.find mapping n in
+    Type.unify t1 t2;
+    t1) g in
+  M.fold (fun n t s' -> M.add n (Value (gen s t)) s') g s
+
+and check_pat acc s = function
+  | Ast.PIgn -> (acc, Type.new_tyvar ())
 
   | Ast.PVar (n, p) -> begin
-    let (s, ty) = check_pat' s p in
-    match M.find_opt n s with
-      | Some _ -> failwith "Illegal duplicate binding in the same pattern"
-      | None -> (M.add n ty s, ty)
+    let (acc, ty) = check_pat acc s p in
+    match M.find_opt n acc with
+      | None -> (M.add n (Value ty) acc, ty)
+      | _ -> failwith "Illegal duplicate binding in the same pattern"
   end
 
   | Ast.PTup xs ->
-    let (s, xs) = List.fold_left (fun (s, acc) p ->
-      let (s, p) = check_pat' s p in
-      (s, p :: acc)) (s, []) xs in
-    (s, TyTup (List.rev xs))
+    let (acc, xs) = List.fold_left (fun (acc, xs) p ->
+      let (acc, p) = check_pat acc s p in
+      (acc, p :: xs)) (acc, []) xs in
+    (acc, TyTup (List.rev xs))
 
   | Ast.PDecons (k, dinfo, args) ->
-    let (d, params) = match Hashtbl.find_opt datadef_table k with
-      | Some q -> q
-      | None -> failwith ("Unrecognized data constructor " ^ k) in
+    let (d, params) = match M.find_opt k s with
+      | Some (Ctor q) -> q
+      | _ -> failwith ("Unrecognized data constructor " ^ k) in
 
     let (_, polys, _) = d in
     let (targs, penv) = List.fold_right (fun p (xs, penv) ->
       let t = Type.new_tyvar () in
       (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
 
-    let rec loop s = function
+    let rec loop acc = function
       | [], [] ->
         dinfo := d;
-        (s, Type.TyDat (d, targs))
+        (acc, Type.TyDat (d, targs))
       | param :: xs, arg :: ys ->
-        let (s, arg) = check_pat' s arg in
+        let (acc, arg) = check_pat acc s arg in
         let param = Type.subst penv param in
         Type.unify arg param;
-        loop s (xs, ys)
+        loop acc (xs, ys)
       | _ -> failwith "Data constructor argument length mismatch" in
-    loop s (params, args)
+    loop acc (params, args)
 
-and check_pat p =
-  check_pat' M.empty p
+and eval_texpr s = function
+  | Ast.TEVar n -> begin
+    match M.find_opt n s with
+      | Some (Value t) -> t
+      | _ -> failwith ("Type variable " ^ n ^ " not found")
+  end
 
-let check e =
+  | Ast.TEArr (a, r) ->
+    Type.TyArr (eval_texpr s a, eval_texpr s r)
+
+  | Ast.TETup elts ->
+    Type.TyTup (List.map (eval_texpr s) elts)
+
+  | Ast.TECons (k, args) ->
+    match M.find_opt k s with
+      | Some (Ctor info) ->
+        let (_, params, _) = info in
+        let args = try
+          List.fold_left2 (fun xs a _ -> eval_texpr s a :: xs) [] args params
+        with _ -> failwith ("Type constructor argument length mismatch") in
+        Type.TyDat (info, List.rev args)
+      | _ -> failwith ("Type constructor " ^ k ^ " not found")
+
+and check_data_def styp b =
+  let m = Hashtbl.create 16 in
+  let ctors = List.map (fun (n, targs, _) ->
+    let (_, targs, env) = List.fold_left (fun (v, xs, m) a ->
+      let m = M.update a (function
+        | None -> Some (Value (Type.TyPly v))
+        | _ -> failwith "Illegal duplicate type argument in same data definition") m in
+      (Z.succ v, v :: xs, m)) (Z.zero, [], M.empty) targs in
+
+    let mapping = Hashtbl.create 16 in
+    let self = (n, List.rev targs, mapping) in
+    if Hashtbl.mem m n then
+      failwith "Illegal duplicate data name in same block";
+    Hashtbl.add m n (mapping, env);
+    self) b in
+
+  let styp = List.fold_left (fun styp self ->
+    let (n, _, _) = self in
+    M.add n (Ctor self) styp) styp ctors in
+
+  List.iter (fun (n, _, cases) ->
+    let (m, env) = Hashtbl.find m n in
+    let styp = M.union (fun _ _ v -> Some v) styp env in
+    List.iteri (fun i (k, args) ->
+      if Hashtbl.mem m k then
+        failwith "Illegal duplicate constrructor in same data definition";
+      Hashtbl.add m k (i, List.map (eval_texpr styp) args)) cases) b;
+
+  ctors
+
+let check (exports, m) =
+  let rec check_module sval styp = function
+    | [] -> (sval, styp)
+    | Ast.RExpr e :: xs ->
+      let _ = check' sval e in
+      check_module sval styp xs
+    | Ast.RLet b :: xs ->
+      let sval = check_let_binder sval b in
+      check_module sval styp xs
+    | Ast.RRec b :: xs ->
+      let sval = check_rec_binder sval b in
+      check_module sval styp xs
+    | Ast.RData b :: xs ->
+      let ctors = check_data_def styp b in
+      let (sval, styp) = List.fold_left (fun (sval, styp) ctor ->
+        let (n, _, _) = ctor in
+        (register_ctors ctor sval, M.add n (Ctor ctor) styp)) (sval, styp) ctors in
+      check_module sval styp xs in
+
+  let sval = register_ctors Type.datadef_List M.empty in
+  let styp = M.singleton "[]" (Ctor Type.datadef_List) in
   try
-    Ok (check' M.empty e)
+    let (sval, _) = check_module sval styp m in
+    List.iter (fun n ->
+      if not (M.mem n sval) then
+        failwith ("Cannot export non existent " ^ n)) exports;
+    Ok ()
   with Failure e -> Error e
 
 let rec lower_funk e id s h k =
@@ -177,25 +263,12 @@ let rec lower_funk e id s h k =
     | Ast.EVar n -> k id (M.find n s)
 
     | Ast.ELet (b, e) ->
-      let rec beval id s' = function
-        | (n, i) :: xs ->
-          lower_funk i id s h (fun id i -> beval id (M.add n i s') xs)
-        | [] ->
-          lower_funk e id s' h k in
-      beval id s b
+      lower_let_binder b id s h (fun id s ->
+        lower_funk e id s h k)
 
-    | Ast.ERec (bs, e) ->
-      let (id, s, bs) = List.fold_left (fun (id, s, bs) (n, i) ->
-        (id + 1, M.add n id s, (id, i) :: bs)) (id, s, []) bs in
-      let (id, bs) = List.fold_left (fun (id, bs) (slot, i) ->
-        let (id, term) = lower_funk i id s h (fun id v ->
-          (id, Jmp (slot, [v]))) in
-        match term with
-          | LetFun ((f, args, k, h, r), { contents = Jmp (m1, [m2]) })
-            when m1 = slot && m2 = f -> (id, (slot, args, k, h, r) :: bs)
-          | _ -> failwith "Recursive bindings cannot have initializers of this form") (id, []) bs in
-      let (id, term) = lower_funk e id s h k in
-      (id, LetRec (bs, ref term))
+    | Ast.ERec (b, e) ->
+      lower_rec_binder b id s h (fun id s ->
+        lower_funk e id s h k)
 
     | Ast.ETup xs ->
       let rec loop id acc = function
@@ -251,6 +324,37 @@ let rec lower_funk e id s h k =
           (id, Jmp (end_k, [v]))) in
         let (id, tail) = k id end_k in
         (id, LetCont ([end_k, [end_k], ref tail], ref term)))
+
+and lower_let_binder b id s h k =
+  let rec loop id s' n = match n () with
+    | Seq.Cons ((n, ([], i) :: _), xs) ->
+      lower_funk i id s h (fun id i -> loop id (M.add n i s') xs)
+    | Seq.Cons ((n, mat), xs) ->
+      let mat = List.map (fun (p, e) -> (p, s, e)) mat in
+      lower_generalized_lambda id mat (fun id i -> loop id (M.add n i s') xs)
+    | Seq.Nil ->
+      k id s' in
+  b |> group_binders |> M.to_seq |> loop id s
+
+and lower_rec_binder b id s h k =
+  let (id, s, b) = b
+    |> group_binders
+    |> M.to_seq
+    |> Seq.fold_left (fun (id, s, b) (n, mat) ->
+      (id + 1, M.add n id s, (id, mat) :: b)) (id, s, []) in
+  let (id, b) = List.fold_left (fun (id, b) (slot, i) ->
+    let (id, term) = match i with
+      | ([], i) :: _ ->
+        lower_funk i id s h (fun id v -> (id, Jmp (slot, [v])))
+      | mat ->
+        let mat = List.map (fun (p, e) -> (p, s, e)) mat in
+        lower_generalized_lambda id mat (fun id v -> (id, Jmp (slot, [v]))) in
+    match term with
+      | LetFun ((f, args, k, h, r), { contents = Jmp (m1, [m2]) })
+        when m1 = slot && m2 = f -> (id, (slot, args, k, h, r) :: b)
+      | _ -> failwith "Recursive bindings cannot have initializers of this form") (id, []) b in
+  let (id, term) = k id s in
+  (id, LetRec (b, ref term))
 
 and lower_generalized_lambda id cases k =
   (* since this is a generalized lambda, the non-empty pattern matrix would
@@ -423,9 +527,29 @@ and lower_case v id cases h k =
         | Some s -> lower_funk e id s h k
         | None -> expand v cases
 
-let lower e =
+let lower (exports, m) =
+  let export_sym = ref [] in
+  let rec lower_module id s = function
+    | [] -> begin
+      let m = Hashtbl.create 16 in
+      let (list1, list2) = List.fold_left (fun (xs, ys) n ->
+        if Hashtbl.mem m n then (xs, ys)
+        else begin
+          Hashtbl.add m n ();
+          ((n, M.find n s) :: xs, n :: ys)
+        end) ([], []) exports in
+      export_sym := list2;
+      (id, Export list1)
+    end
+    | Ast.RExpr e :: xs ->
+      lower_funk e id s 0 (fun id _ -> lower_module id s xs)
+    | Ast.RLet b :: xs ->
+      lower_let_binder b id s 0 (fun id s -> lower_module id s xs)
+    | Ast.RRec b :: xs ->
+      lower_rec_binder b id s 0 (fun id s -> lower_module id s xs)
+    | Ast.RData _ :: xs ->
+      lower_module id s xs in
   try
-    let (_, term) = lower_funk e 1 M.empty 0 (fun id v ->
-      (id, Export ["_", v])) in
-    Ok (Module (["_"], ref 0, ref term))
+    let (_, term) = lower_module 1 M.empty m in
+    Ok (Module (!export_sym, ref 0, ref term))
   with Failure e -> Error e
