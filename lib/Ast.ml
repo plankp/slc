@@ -30,6 +30,7 @@ and pat =
   | PVar of string * pat
   | PTup of pat list
   | PDecons of string * Type.datadef ref * pat list
+  | PTyped of pat * texpr
 
 and texpr =
   | TEVar of string

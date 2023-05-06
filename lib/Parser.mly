@@ -100,6 +100,10 @@ case:
   | p = pattern ARROW e = expr { (p, e) }
 
 pattern:
+  | e = pattern_cons COLON t = texpr { PTyped (e, t) }
+  | e = pattern_cons { e }
+
+pattern_cons:
   | hd = pattern_app; CONS; tl = pattern {
     PDecons ("::", ref Type.datadef_Void, [hd; tl])
   }

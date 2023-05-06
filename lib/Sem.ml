@@ -8,6 +8,9 @@ type ('a, 'b) ventry =
   | Ctor of 'a
   | Value of 'b
 
+type styp_t = (Type.datadef, Type.t) ventry M.t
+type sval_t = (Type.datadef * Type.t list, Type.t) ventry M.t
+
 let register_ctors (d : Type.datadef) s =
   let (_, _, q) = d in
   Hashtbl.fold (fun k (_, args) s ->
@@ -47,7 +50,7 @@ let rec check' sval styp = function
   end
 
   | Ast.ETyped (e, t) ->
-    let t = eval_texpr styp t in
+    let (_, t) = eval_texpr false styp t in
     let e = check' sval styp e in
     Type.unify e t;
     t
@@ -106,8 +109,7 @@ let rec check' sval styp = function
     let valty = check' sval styp e in
     let resty = Type.new_tyvar () in
     List.iter (fun (p, e) ->
-      let (binds, ty) = check_pat M.empty sval styp p in
-      Type.unify valty ty;
+      let (binds, styp) = check_pat valty M.empty styp sval p in
       let sval = M.union (fun _ _ t -> Some t) sval binds in
       let ty = check' sval styp e in
       Type.unify resty ty) xs;
@@ -116,9 +118,10 @@ let rec check' sval styp = function
 and check_generalized_lambda sval styp cases =
   let rowty = Type.new_tyvar () in
   List.iter (fun (ps, e) ->
-    let (env, args) = List.fold_left (fun (env, acc) p ->
-      let (env, p) = check_pat env sval styp p in
-      (env, p :: acc)) (M.empty, []) ps in
+    let (env, styp, args) = List.fold_left (fun (env, styp, acc) p ->
+      let t = Type.new_tyvar () in
+      let (env, styp) = check_pat t env styp sval p in
+      (env, styp, t :: acc)) (M.empty, styp, []) ps in
     let sval = M.union (fun _ _ v -> Some v) sval env in
     let ty = check' sval styp e in
     let ty = List.fold_left (fun r a -> Type.TyArr (a, r)) ty args in
@@ -144,65 +147,96 @@ and check_rec_binder sval styp b =
     t1) g in
   M.fold (fun n t sval' -> M.add n (Value (gen sval t)) sval') g sval
 
-and check_pat acc sval styp = function
-  | Ast.PIgn -> (acc, Type.new_tyvar ())
+and check_pat (t : Type.t) accval (styp : styp_t) (sval : sval_t) = function
+  | Ast.PIgn -> (accval, styp)
 
   | Ast.PVar (n, p) -> begin
-    let (acc, ty) = check_pat acc sval styp p in
-    match M.find_opt n acc with
-      | None -> (M.add n (Value ty) acc, ty)
+    match M.find_opt n accval with
+      | None -> check_pat t (M.add n (Value t) accval) styp sval p
       | _ -> failwith "Illegal duplicate binding in the same pattern"
   end
 
+  | Ast.PTyped (p, t') ->
+    (* perform type unify before traversing downwards to provide subpattern
+     * with more hints on data constructor deconstructing *)
+    let (styp, t') = eval_texpr true styp t' in
+    Type.unify t t';
+    check_pat t' accval styp sval p
+
   | Ast.PTup xs ->
-    let (acc, xs) = List.fold_left (fun (acc, xs) p ->
-      let (acc, p) = check_pat acc sval styp p in
-      (acc, p :: xs)) (acc, []) xs in
-    (acc, TyTup (List.rev xs))
+    let ts = List.map (fun _ -> Type.new_tyvar ()) xs in
+    Type.unify t (Type.TyTup ts);
+    List.fold_left2 (fun (accval, styp) p t ->
+      check_pat t accval styp sval p) (accval, styp) xs ts
 
   | Ast.PDecons (k, dinfo, args) ->
-    let (d, params) = match M.find_opt k sval with
-      | Some (Ctor q) -> q
-      | _ -> failwith ("Unrecognized data constructor " ^ k) in
+    (* The type from the context might help us resolve the correct data
+     * constructor.
+     *
+     * only fallback to lookup the data constructor from the surrounding scope
+     * when the context is not helpful (which might be the case) *)
+    let (d, params) = match Type.unwrap_shallow t with
+      | TyDat ((_, _, cases) as d, _) -> begin
+        match Hashtbl.find_opt cases k with
+          | Some (_, args) -> (d, args)
+          | _ -> failwith ("Unrecognized data constructor " ^ k)
+      end
+      | _ ->
+        match M.find_opt k sval with
+          | Some (Ctor q) -> q
+          | _ -> failwith ("Unrecognized data constructor " ^ k) in
 
     let (_, polys, _) = d in
     let (targs, penv) = List.fold_right (fun p (xs, penv) ->
       let t = Type.new_tyvar () in
       (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
 
-    let rec loop acc = function
+    (* again, we want to unify beforehand to provide info to the arguments *)
+    Type.unify t (Type.TyDat (d, targs));
+
+    let rec loop accval styp = function
       | [], [] ->
         dinfo := d;
-        (acc, Type.TyDat (d, targs))
+        (accval, styp)
       | param :: xs, arg :: ys ->
-        let (acc, arg) = check_pat acc sval styp arg in
         let param = Type.subst penv param in
-        Type.unify arg param;
-        loop acc (xs, ys)
+        let (accval, styp) = check_pat param accval styp sval arg in
+        loop accval styp (xs, ys)
       | _ -> failwith "Data constructor argument length mismatch" in
-    loop acc (params, args)
+    loop accval styp (params, args)
 
-and eval_texpr s = function
+and eval_texpr (create_fresh : bool) (s : styp_t) = function
   | Ast.TEVar n -> begin
     match M.find_opt n s with
-      | Some (Value t) -> t
-      | _ -> failwith ("Type variable " ^ n ^ " not found")
+      | Some (Value t) -> (s, t)
+      | _ when not create_fresh ->
+        failwith ("Type variable " ^ n ^ " not found")
+      | _ ->
+        let t = Type.new_tyvar () in
+        (M.add n (Value t) s, t)
   end
 
   | Ast.TEArr (a, r) ->
-    Type.TyArr (eval_texpr s a, eval_texpr s r)
+    let (s, a) = eval_texpr create_fresh s a in
+    let (s, r) = eval_texpr create_fresh s r in
+    (s, Type.TyArr (a, r))
 
   | Ast.TETup elts ->
-    Type.TyTup (List.map (eval_texpr s) elts)
+    let (s, elts) = List.fold_left (fun (s, xs) e ->
+      let (s, e) = eval_texpr create_fresh s e in
+      (s, e :: xs)) (s, []) elts in
+    (s, Type.TyTup (List.rev elts))
 
   | Ast.TECons (k, args) ->
     match M.find_opt k s with
       | Some (Ctor info) ->
         let (_, params, _) = info in
-        let args = try
-          List.fold_left2 (fun xs a _ -> eval_texpr s a :: xs) [] args params
+        let (s, args) = try
+          List.fold_left2 (fun (s, xs) a _ ->
+            let (s, a) = eval_texpr create_fresh s a in
+            (s, a :: xs)) (s, []) args params
         with _ -> failwith ("Type constructor argument length mismatch") in
-        Type.TyDat (info, List.rev args)
+        (s, Type.TyDat (info, List.rev args))
       | _ -> failwith ("Type constructor " ^ k ^ " not found")
 
 and check_data_def styp b =
@@ -231,7 +265,9 @@ and check_data_def styp b =
     List.iteri (fun i (k, args) ->
       if Hashtbl.mem m k then
         failwith "Illegal duplicate constrructor in same data definition";
-      Hashtbl.add m k (i, List.map (eval_texpr styp) args)) cases) b;
+      Hashtbl.add m k (i, List.map (fun t ->
+        let (_, t) = eval_texpr false styp t in
+        t) args)) cases) b;
 
   ctors
 
@@ -408,8 +444,10 @@ and lower_case v id cases h k =
   let rec is_simple_capture s = function
     | _ :: vs, Ast.PIgn :: ps ->
       is_simple_capture s (vs, ps)
-    | v :: vs, Ast.PVar (n, p) :: ps ->
-      is_simple_capture (M.add n v s) (v :: vs, p :: ps)
+    | (v :: _ as vs), Ast.PVar (n, p) :: ps ->
+      is_simple_capture (M.add n v s) (vs, p :: ps)
+    | vs, Ast.PTyped (p, _) :: ps ->
+      is_simple_capture s (vs, p :: ps)
     | [], [] -> Some s
     | _ -> None in
 
@@ -438,6 +476,8 @@ and lower_case v id cases h k =
                     (List.rev_append pinit (elts @ ps), s, e)
                   | [], Ast.PVar (n, p) :: ps ->
                     coiter pinit (M.add n v s) ([], p :: ps)
+                  | [], Ast.PTyped (p, _) :: ps ->
+                    coiter pinit s ([], p :: ps)
                   | _ :: xs, p :: ps ->
                     coiter (p :: pinit) s (xs, ps)
                   | _ -> failwith "PATTERN MATRIX DIMENSION MISMATCH" in
@@ -468,6 +508,8 @@ and lower_case v id cases h k =
                 (pinit, ps, s, e)
               | [], Ast.PVar (n, p) :: ps ->
                 coiter pinit (M.add n v s) ([], p :: ps)
+              | [], Ast.PTyped (p, _) :: ps ->
+                coiter pinit s ([], p :: ps)
               | _ :: xs, p :: ps ->
                 coiter (p :: pinit) s (xs, ps)
               | _ -> failwith "PATTERN MATRIX DIMENSION MISMATCH" in
@@ -517,8 +559,10 @@ and lower_case v id cases h k =
 
           case_anchor := Case (v, m);
           (id, !tail)
-        | v :: vs, Ast.PVar (n, p) :: ps ->
-          loop vinit pinit (M.add n v s) (v :: vs, p :: ps)
+        | (v :: _ as vs), Ast.PVar (n, p) :: ps ->
+          loop vinit pinit (M.add n v s) (vs, p :: ps)
+        | vs, Ast.PTyped (p, _) :: ps ->
+          loop vinit pinit s (vs, p :: ps)
         | v :: vs, p :: ps ->
           loop (v :: vinit) (p :: pinit) s (vs, ps)
         | _ -> failwith "PATTERN MATRIX CANNOT BE EXPANDED" in
