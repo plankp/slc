@@ -22,9 +22,6 @@ let env_collect_free (s : ('a, Type.t) ventry M.t) =
       | Value v -> Type.collect_free v s
       | _ -> s) s Type.IdMap.empty
 
-let gen s t =
-  Type.gen (env_collect_free s) t
-
 let group_binders b =
   List.fold_right (fun (n, p, e) m ->
     M.update n (function
@@ -131,7 +128,8 @@ and check_generalized_lambda sval styp cases =
 and check_let_binder sval styp b =
   let g = group_binders b in
   let g = M.map (check_generalized_lambda sval styp) g in
-  M.fold (fun n t sval' -> M.add n (Value (gen sval t)) sval') g sval
+  let monos = env_collect_free sval in
+  M.fold (fun n t sval' -> M.add n (Value (Type.gen monos t)) sval') g sval
 
 and check_rec_binder sval styp b =
   let mapping = Hashtbl.create 16 in
@@ -145,7 +143,8 @@ and check_rec_binder sval styp b =
     let t2 = Hashtbl.find mapping n in
     Type.unify t1 t2;
     t1) g in
-  M.fold (fun n t sval' -> M.add n (Value (gen sval t)) sval') g sval
+  let monos = env_collect_free sval in
+  M.fold (fun n t sval' -> M.add n (Value (Type.gen monos t)) sval') g sval
 
 and check_pat (t : Type.t) accval (styp : styp_t) (sval : sval_t) = function
   | Ast.PIgn -> (accval, styp)
