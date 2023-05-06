@@ -295,8 +295,10 @@ let check (exports, m) =
   try
     let (sval, _) = check_module sval styp m in
     List.iter (fun n ->
-      if not (M.mem n sval) then
-        failwith ("Cannot export non existent " ^ n)) exports;
+      match M.find_opt n sval with
+        | Some (Value t) ->
+          Printf.printf "val %s : %s\n" n (Type.to_string t)
+        | _ -> failwith ("Cannot export non existent " ^ n)) exports;
     Ok ()
   with Failure e -> Error e
 
