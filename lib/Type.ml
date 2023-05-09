@@ -130,43 +130,54 @@ let tvid_occurs_id (id : Z.t) (t : t) : bool =
           if walk ys then true else walk xs in
   walk [t]
 
-let rec unify_loop : (t * t) list -> unit = function
+let rec unify_loop (fixed_tv : fvmap) : (t * t) list -> unit = function
   | [] -> ()
   | (a, b) :: xs ->
-    match unwrap_shallow a, unwrap_shallow b with
-      | TyVar (p, r), TyVar (q, _) ->
-        if not (Z.equal p q) then r := b;
-        unify_loop xs
+    let tail p r t =
+      if tvid_occurs_id p t then
+        failwith "Illegal infinite type construction";
+      r := t;
+      unify_loop fixed_tv xs in
 
-      | TyVar (p, r), t
-      | t, TyVar (p, r) ->
-        if tvid_occurs_id p t then failwith "Illegal infinite type construction";
-        r := t;
-        unify_loop xs
+    match unwrap_shallow a, unwrap_shallow b with
+      | TyVar (p, r1), TyVar (q, r2) ->
+        if not (Z.equal p q) then begin
+          let (b, p, r) =
+            if IdMap.mem p fixed_tv then (a, q, r2) else (b, p, r1) in
+          if IdMap.mem p fixed_tv then
+            failwith "Type unification causes local type variable(s) to escape";
+          r := b;
+        end;
+        unify_loop fixed_tv xs
+
+      | TyVar (p, r), t when not (IdMap.mem p fixed_tv) -> tail p r t
+      | t, TyVar (p, r) when not (IdMap.mem p fixed_tv) -> tail p r t
+      | TyVar _, _ | _, TyVar _ ->
+        failwith "Type unification causes local type variable(s) to escape";
 
       | TyPly a, TyPly b when Z.equal a b ->
-        unify_loop xs
+        unify_loop fixed_tv xs
 
       | TyArr (a1, r1), TyArr (a2, r2) ->
-        unify_loop ((a1, a2) :: (r1, r2) :: xs)
+        unify_loop fixed_tv ((a1, a2) :: (r1, r2) :: xs)
 
       | TyTup e1, TyTup e2 ->
-        loop_tail xs e1 e2
+        loop_tail fixed_tv xs e1 e2
 
       | TyDat (k1, e1), TyDat (k2, e2) when k1 == k2 ->
-        loop_tail xs e1 e2
+        loop_tail fixed_tv xs e1 e2
 
       | _ -> failwith "Impossible type unification"
 
-and loop_tail acc x y =
+and loop_tail fixed_tv acc x y =
   let rec loop acc = function
-    | [], [] -> unify_loop acc
+    | [], [] -> unify_loop fixed_tv acc
     | x :: xs, y :: ys -> loop ((x, y) :: acc) (xs, ys)
     | _ -> failwith "Impossible type unification" in
   loop acc (x, y)
 
-let unify (a : t) (b : t) : unit =
-  unify_loop [a, b]
+let unify (fixed_tv : fvmap) (a : t) (b : t) : unit =
+  unify_loop fixed_tv [a, b]
 
 let rec bprint (buf : Buffer.t) (t : t) : unit =
   let rec walk t =

@@ -23,21 +23,38 @@ let env_collect_free (s : ('a, Type.t) ventry M.t) =
       | _ -> s) s Type.IdMap.empty
 
 let group_binders b =
-  List.fold_right (fun (n, p, e) m ->
-    M.update n (function
-      | None -> Some [(p, e)]
-      | Some v ->
-        match v, p with
-          | ([], _) :: _, _ ->
-            failwith "Duplicate name with binding without pattern"
-          | (xs, _) :: _, ys -> begin
-            let () = try
-              List.iter2 (fun _ _ -> ()) xs ys
-            with
-              _ -> failwith "Cannot mix bindings of different argument lengths" in
-            Some ((p, e) :: v)
-          end
-          | _ -> failwith "INVALID BINDER GROUP STATE") m) b M.empty
+  let mval = Hashtbl.create 16 in
+  let mtyp = Hashtbl.create 16 in
+  let bump_binder = function
+    | Ast.BAnnot (n, t) ->
+      if Hashtbl.mem mtyp n then
+        failwith ("Duplicate type annotation on binding " ^ n);
+      Hashtbl.replace mtyp n t
+    | Ast.BValue (n, p, e) ->
+      let mat = Hashtbl.find_opt mval n |> Option.value ~default:[] in
+      let mat = match mat, p with
+        | [], _ -> [(p, e)]
+        | ([], _) :: _, _ ->
+          failwith ("Duplicate binding without pattern for " ^ n)
+        | (xs, _) :: _, ys ->
+          let () = try
+            List.iter2 (fun _ _ -> ()) xs ys
+          with
+            _ -> failwith "Binding is declared with differing argument lengths" in
+          (p, e) :: mat in
+      Hashtbl.replace mval n mat in
+  List.iter bump_binder b;
+
+  let m = Hashtbl.fold (fun n mat s ->
+    let mat = List.rev mat in
+    let typ = Hashtbl.find_opt mtyp n in
+    Hashtbl.remove mtyp n;
+    M.add n (typ, mat) s) mval M.empty in
+
+  Hashtbl.iter (fun k _ ->
+    failwith ("Missing definition for binding " ^ k)) mtyp;
+
+  m
 
 let rec check' sval styp = function
   | Ast.EVar n -> begin
@@ -49,7 +66,7 @@ let rec check' sval styp = function
   | Ast.ETyped (e, t) ->
     let (_, t) = eval_texpr false styp t in
     let e = check' sval styp e in
-    Type.unify e t;
+    Type.unify Type.IdMap.empty e t;
     t
 
   | Ast.ETup xs ->
@@ -72,7 +89,7 @@ let rec check' sval styp = function
       | param :: xs, arg :: ys ->
         let arg = check' sval styp arg in
         let param = Type.subst penv param in
-        Type.unify arg param;
+        Type.unify Type.IdMap.empty arg param;
         loop (xs, ys)
       | _ -> failwith "Data constructor argument length mismatch" in
     loop (params, args)
@@ -91,7 +108,7 @@ let rec check' sval styp = function
     List.fold_left (fun funty a ->
       let argty = check' sval styp a in
       let resty = Type.new_tyvar () in
-      Type.unify funty (TyArr (argty, resty));
+      Type.unify Type.IdMap.empty funty (TyArr (argty, resty));
       resty) funty xs
 
   | Ast.ELet (b, e) ->
@@ -109,7 +126,7 @@ let rec check' sval styp = function
       let (binds, styp) = check_pat valty M.empty styp sval p in
       let sval = M.union (fun _ _ t -> Some t) sval binds in
       let ty = check' sval styp e in
-      Type.unify resty ty) xs;
+      Type.unify Type.IdMap.empty resty ty) xs;
     resty
 
 and check_generalized_lambda sval styp cases =
@@ -122,29 +139,49 @@ and check_generalized_lambda sval styp cases =
     let sval = M.union (fun _ _ v -> Some v) sval env in
     let ty = check' sval styp e in
     let ty = List.fold_left (fun r a -> Type.TyArr (a, r)) ty args in
-    Type.unify ty rowty) cases;
+    Type.unify Type.IdMap.empty ty rowty) cases;
   Type.unwrap_shallow rowty
 
 and check_let_binder sval styp b =
   let g = group_binders b in
-  let g = M.map (check_generalized_lambda sval styp) g in
+  let g = M.map (fun (t, m) ->
+    (t, check_generalized_lambda sval styp m)) g in
+
   let monos = env_collect_free sval in
-  M.fold (fun n t sval' -> M.add n (Value (Type.gen monos t)) sval') g sval
+  M.fold (fun n (t, t') sval ->
+    let t = match t with
+      | None -> t'
+      | Some t ->
+        let (_, t) = eval_texpr true styp t in
+        let t = Type.gen monos t in
+        Type.unify monos t t';
+        t in
+    M.add n (Value t) sval) g sval
 
 and check_rec_binder sval styp b =
-  let mapping = Hashtbl.create 16 in
   let g = group_binders b in
-  let sval' = M.fold (fun n _ sval' ->
-    let recty = Type.new_tyvar () in
-    Hashtbl.add mapping n recty;
-    M.add n (Value recty) sval') g sval in
-  let g = M.mapi (fun n mat ->
-    let t1 = check_generalized_lambda sval' styp mat in
-    let t2 = Hashtbl.find mapping n in
-    Type.unify t1 t2;
-    t1) g in
+  let mapping = Hashtbl.create 16 in
   let monos = env_collect_free sval in
-  M.fold (fun n t sval' -> M.add n (Value (Type.gen monos t)) sval') g sval
+  let sval' = M.fold (fun n (t, _) sval' ->
+    let t = match t with
+      | None -> Type.new_tyvar ()
+      | Some t ->
+        let (_, t) = eval_texpr true styp t in
+        Type.gen monos t in
+    Hashtbl.add mapping n t;
+    M.add n (Value t) sval') g sval in
+  let pairs = M.fold (fun n (annot, m) xs ->
+    let t' = check_generalized_lambda sval' styp m in
+    let t = Hashtbl.find mapping n in
+    if annot <> None then
+      (t, t') :: xs
+    else begin
+      Type.unify Type.IdMap.empty t t'; xs
+    end) g [] in
+
+  let monos = env_collect_free sval in
+  List.iter (fun (t, t') -> Type.unify monos t t') pairs;
+  sval'
 
 and check_pat (t : Type.t) accval (styp : styp_t) (sval : sval_t) = function
   | Ast.PIgn -> (accval, styp)
@@ -159,12 +196,12 @@ and check_pat (t : Type.t) accval (styp : styp_t) (sval : sval_t) = function
     (* perform type unify before traversing downwards to provide subpattern
      * with more hints on data constructor deconstructing *)
     let (styp, t') = eval_texpr true styp t' in
-    Type.unify t t';
+    Type.unify Type.IdMap.empty t t';
     check_pat t' accval styp sval p
 
   | Ast.PTup xs ->
     let ts = List.map (fun _ -> Type.new_tyvar ()) xs in
-    Type.unify t (Type.TyTup ts);
+    Type.unify Type.IdMap.empty t (Type.TyTup ts);
     List.fold_left2 (fun (accval, styp) p t ->
       check_pat t accval styp sval p) (accval, styp) xs ts
 
@@ -191,7 +228,7 @@ and check_pat (t : Type.t) accval (styp : styp_t) (sval : sval_t) = function
       (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
 
     (* again, we want to unify beforehand to provide info to the arguments *)
-    Type.unify t (Type.TyDat (d, targs));
+    Type.unify Type.IdMap.empty t (Type.TyDat (d, targs));
 
     let rec loop accval styp = function
       | [], [] ->
@@ -372,9 +409,9 @@ let rec lower_funk e id s h k =
 
 and lower_let_binder b id s h k =
   let rec loop id s' n = match n () with
-    | Seq.Cons ((n, ([], i) :: _), xs) ->
+    | Seq.Cons ((n, (_, ([], i) :: _)), xs) ->
       lower_funk i id s h (fun id i -> loop id (M.add n i s') xs)
-    | Seq.Cons ((n, mat), xs) ->
+    | Seq.Cons ((n, (_, mat)), xs) ->
       let mat = List.map (fun (p, e) -> (p, s, e)) mat in
       lower_generalized_lambda id mat (fun id i -> loop id (M.add n i s') xs)
     | Seq.Nil ->
@@ -385,7 +422,7 @@ and lower_rec_binder b id s h k =
   let (id, s, b) = b
     |> group_binders
     |> M.to_seq
-    |> Seq.fold_left (fun (id, s, b) (n, mat) ->
+    |> Seq.fold_left (fun (id, s, b) (n, (_, mat)) ->
       (id + 1, M.add n id s, (id, mat) :: b)) (id, s, []) in
   let (id, b) = List.fold_left (fun (id, b) (slot, i) ->
     let (id, term) = match i with

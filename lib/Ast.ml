@@ -23,7 +23,8 @@ and expr =
   | ETyped of expr * texpr
 
 and binder =
-  string * pat list * expr
+  | BValue of string * pat list * expr
+  | BAnnot of string * texpr
 
 and pat =
   | PIgn
