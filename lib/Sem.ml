@@ -333,6 +333,12 @@ let check (exports, m) =
     List.iter (fun n ->
       match M.find_opt n sval with
         | Some (Value t) ->
+          let has_fvs = Type.IdMap.empty
+            |> Type.collect_free t
+            |> Type.IdMap.is_empty
+            |> not in
+          if has_fvs then
+            failwith "Cannot export binding with weak type";
           Printf.printf "val %s : %s\n" n (Type.to_string t)
         | _ -> failwith ("Cannot export non existent " ^ n)) exports;
     Ok ()
