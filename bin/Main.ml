@@ -106,7 +106,9 @@ let () =
     | Ok m ->
       match Sem.check m with
         | Error e -> print_endline e
-        | Ok _ ->
+        | Ok ext ->
+          Sem.M.iter (fun n t ->
+            Printf.printf "val %s : %s\n" n (Type.to_string t)) ext;
           match Sem.lower m with
             | Error e -> print_endline e
             | Ok m -> transform_program m |> ignore

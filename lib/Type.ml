@@ -1,19 +1,24 @@
 module IdMap = Map.Make (Z)
 
 type t =
-  | TyVar of tyvar
-  | TyPly of Z.t
+  | TyVar of tyvar ref
+  | TyPly of tname
   | TyArr of t * t
   | TyTup of t list
   | TyDat of datadef * t list
 
 and tyvar =
-  Z.t * t ref
+  | Unbound of tname
+  | Link of t
+
+and tname =
+  Z.t * level
+
+and level =
+  Z.t
 
 and datadef =
   string * Z.t list * (string, int * t list) Hashtbl.t
-
-type fvmap = t ref IdMap.t
 
 let datadef_Void : datadef =
   ("Void", [], Hashtbl.create 0)
@@ -21,186 +26,172 @@ let datadef_Void : datadef =
 let datadef_List : datadef =
   let m = Hashtbl.create 2 in
   let self = ("List", [Z.zero], m) in
+  let t0 = TyPly (Z.zero, Z.zero) in
   Hashtbl.add m "[]" (0, []);
-  Hashtbl.add m "::" (1, [TyPly Z.zero; (TyDat (self, [TyPly Z.zero]))]);
+  Hashtbl.add m "::" (1, [t0; (TyDat (self, [t0]))]);
   self
 
-let new_tyvar : unit -> t =
+let null_level : level = Z.zero
+let incr_level : level -> level = Z.succ
+let decr_level : level -> level = Z.pred
+
+let new_tyvar : level -> t =
   let fresh_id = ref Z.zero in
-  fun () ->
-    let rec t = TyVar (!fresh_id, ref t) in
-    fresh_id := Z.succ !fresh_id;
+  fun level ->
+    let id = !fresh_id in
+    let t = TyVar (ref (Unbound (id, level))) in
+    fresh_id := Z.succ id;
     t
 
 let rec unwrap_shallow : t -> t = function
-  | TyVar (_, r) as t when !r != t ->
-    let t = unwrap_shallow !r in
-    r := t;
+  | TyVar ({ contents = Link t } as r) ->
+    let t = unwrap_shallow t in
+    r := Link t;
     t
   | t -> t
 
-let inst (t : t) : t =
+let rec has_free_tv : t -> bool = function
+  | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> has_free_tv
+  | TyVar _ -> true
+  | TyPly _ -> false
+  | TyArr (a, r) -> if has_free_tv a then true else has_free_tv r
+  | TyTup xs | TyDat (_, xs) -> List.exists has_free_tv xs
+
+let inst (level : level) (t : t) : t =
   let map = Hashtbl.create 16 in
-  let rec walk t =
-    match unwrap_shallow t with
-      | TyVar _ as t -> t
-      | TyArr (a, r) -> TyArr (walk a, walk r)
-      | TyTup xs -> TyTup (List.map walk xs)
-      | TyDat (k, xs) -> TyDat (k, List.map walk xs)
-      | TyPly k ->
-        match Hashtbl.find_opt map k with
-          | Some v -> v
-          | None ->
-            let v = new_tyvar () in
-            Hashtbl.add map k v;
-            v in
+  let rec walk = function
+    | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> walk
+    | TyVar _ as t -> t
+    | TyArr (a, r) -> TyArr (walk a, walk r)
+    | TyTup xs -> TyTup (List.map walk xs)
+    | TyDat (k, xs) -> TyDat (k, List.map walk xs)
+    | TyPly k ->
+      match Hashtbl.find_opt map k with
+        | Some v -> v
+        | None ->
+          let v = new_tyvar level in
+          Hashtbl.add map k v;
+          v in
   walk t
 
-let rec subst (m : t IdMap.t) (t : t) : t =
-  let t = unwrap_shallow t in
-  match t with
-    | _ when IdMap.is_empty m -> t
-    | TyVar _ -> t
-    | TyArr (a, r) -> TyArr (subst m a, subst m r)
-    | TyTup xs -> TyTup (List.map (subst m) xs)
-    | TyDat (k, xs) -> TyDat (k, List.map (subst m) xs)
-    | TyPly id ->
-      match IdMap.find_opt id m with
-        | Some t -> t
-        | None -> t
+let rec subst (m : t IdMap.t) : t -> t = function
+  | t when IdMap.is_empty m -> t
+  | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> subst m
+  | TyVar _ as t -> t
+  | TyArr (a, r) -> TyArr (subst m a, subst m r)
+  | TyTup xs -> TyTup (List.map (subst m) xs)
+  | TyDat (k, xs) -> TyDat (k, List.map (subst m) xs)
+  | TyPly (id, _) as t -> m |> IdMap.find_opt id |> Option.value ~default:t
 
-let rec collect_free (t : t) (m : fvmap) : fvmap =
-  match unwrap_shallow t with
-    | TyVar (id, r) ->
-      IdMap.add id r m
-    | TyPly _ ->
-      m
-    | TyArr (a, r) ->
-      m |> collect_free a |> collect_free r
-    | TyTup xs | TyDat (_, xs) ->
-      List.fold_left (fun m t -> collect_free t m) m xs
-
-let gen (mono : 'a IdMap.t) (t : t) : t =
+let gen (level : level) (t : t) : t =
   let map = Hashtbl.create 16 in
-  let rec walk next_id t =
-    match unwrap_shallow t with
-      | TyPly _ -> failwith "Invalid existing poly type when generalizing"
-      | TyArr (a, r) ->
-        let (next_id, a) = walk next_id a in
-        let (next_id, r) = walk next_id r in
-        (next_id, TyArr (a, r))
-      | TyTup xs ->
-        let (next_id, xs) = List.fold_left (fun (next_id, acc) t ->
-          let (next_id, t) = walk next_id t in
-          (next_id, t :: acc)) (next_id, []) xs in
-        (next_id, TyTup (List.rev xs))
-      | TyDat (k, xs) ->
-        let (next_id, xs) = List.fold_left (fun (next_id, acc) t ->
-          let (next_id, t) = walk next_id t in
-          (next_id, t :: acc)) (next_id, []) xs in
-        (next_id, TyDat (k, List.rev xs))
-      | TyVar (id, _) ->
-        if IdMap.mem id mono then
-          (* this one stays monomorphic *)
-          (next_id, t)
-        else
-          match Hashtbl.find_opt map id with
-            | Some t -> (next_id, t)
-            | _ ->
-              let t = TyPly next_id in
-              Hashtbl.add map id t;
-              (Z.succ next_id, t) in
-  t |> walk Z.zero |> snd
-
-let get_tvid (t : t) : Z.t option =
-  match unwrap_shallow t with
-    | TyVar (v, _) -> Some v
-    | _ -> None
-
-let tvid_occurs_id (id : Z.t) (t : t) : bool =
+  let next_id = ref Z.zero in
   let rec walk = function
-    | [] -> false
-    | x :: xs ->
-      match unwrap_shallow x with
-        | TyVar (q, _) ->
-          if Z.equal q id then true else walk xs
-        | TyPly _ -> walk xs
-        | TyArr (p, q) -> walk (p :: q :: xs)
-        | TyTup ys | TyDat (_, ys) ->
-          if walk ys then true else walk xs in
-  walk [t]
+    | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> walk
+    | TyPly _ -> failwith "Invalid existing polytype when generalizing"
+    | TyArr (a, r) -> TyArr (walk a, walk r)
+    | TyTup xs -> TyTup (List.map walk xs)
+    | TyDat (k, xs) -> TyDat (k, List.map walk xs)
+    | TyVar { contents = Unbound (n, l) } as t ->
+      if Z.compare l level <= 0 then t
+      else
+        match Hashtbl.find_opt map n with
+          | Some t -> t
+          | _ ->
+            let name = !next_id in
+            let t = TyPly (name, level) in
+            next_id := Z.succ name;
+            Hashtbl.add map n t;
+            t in
+  walk t
 
-let rec unify_loop (fixed_tv : fvmap) : (t * t) list -> unit = function
+let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
+  | TyVar { contents = Link _ } as t ->
+    t |> unwrap_shallow |> occurs_unify cell l2
+  | TyVar ({ contents = Unbound (n, l1) } as r) ->
+    if r == cell then
+      failwith "Illegal infinite type construction";
+    (* keep the lower level *)
+    r := Unbound (n, Z.min l1 l2)
+  | TyPly (_, l1) ->
+    if Z.compare l1 l2 >= 0 then
+      failwith "Unification cause rigid type variable to escape its scope"
+  | TyArr (p, q) ->
+    occurs_unify cell l2 p;
+    occurs_unify cell l2 q
+  | TyTup xs | TyDat (_, xs) ->
+    List.iter (occurs_unify cell l2) xs
+
+let rec unify_loop : (t * t) list -> unit = function
   | [] -> ()
   | (a, b) :: xs ->
-    let tail p r t =
-      if tvid_occurs_id p t then
-        failwith "Illegal infinite type construction";
-      r := t;
-      unify_loop fixed_tv xs in
+    match a, b with
+      | TyVar { contents = Link _ }, _
+      | _, TyVar { contents = Link _ } ->
+        unify_loop ((unwrap_shallow a, unwrap_shallow b) :: xs)
 
-    match unwrap_shallow a, unwrap_shallow b with
-      | TyVar (p, r1), TyVar (q, r2) ->
-        if not (Z.equal p q) then begin
-          let (b, p, r) =
-            if IdMap.mem p fixed_tv then (a, q, r2) else (b, p, r1) in
-          if IdMap.mem p fixed_tv then
-            failwith "Type unification causes local type variable(s) to escape";
-          r := b;
+      | TyVar ({ contents = Unbound (_, l1) } as r1),
+        TyVar ({ contents = Unbound (_, l2) } as r2) ->
+        if r1 != r2 then begin
+          (* we want to keep the one with the lower level *)
+          if Z.compare l1 l2 < 0 then r2 := Link a
+          else r1 := Link b
         end;
-        unify_loop fixed_tv xs
+        unify_loop xs
 
-      | TyVar (p, r), t when not (IdMap.mem p fixed_tv) -> tail p r t
-      | t, TyVar (p, r) when not (IdMap.mem p fixed_tv) -> tail p r t
-      | TyVar _, _ | _, TyVar _ ->
-        failwith "Type unification causes local type variable(s) to escape";
+      | TyVar ({ contents = Unbound (_, l)} as r), t
+      | t, TyVar ({ contents = Unbound (_, l)} as r) ->
+        occurs_unify r l t;
+        r := Link t;
+        unify_loop xs
 
-      | TyPly a, TyPly b when Z.equal a b ->
-        unify_loop fixed_tv xs
+      | TyPly a, TyPly b when a = b ->
+        unify_loop xs
 
       | TyArr (a1, r1), TyArr (a2, r2) ->
-        unify_loop fixed_tv ((a1, a2) :: (r1, r2) :: xs)
+        unify_loop ((a1, a2) :: (r1, r2) :: xs)
 
       | TyTup e1, TyTup e2 ->
-        loop_tail fixed_tv xs e1 e2
+        loop_tail xs e1 e2
 
       | TyDat (k1, e1), TyDat (k2, e2) when k1 == k2 ->
-        loop_tail fixed_tv xs e1 e2
+        loop_tail xs e1 e2
 
       | _ -> failwith "Impossible type unification"
 
-and loop_tail fixed_tv acc x y =
+and loop_tail acc x y =
   let rec loop acc = function
-    | [], [] -> unify_loop fixed_tv acc
+    | [], [] -> unify_loop acc
     | x :: xs, y :: ys -> loop ((x, y) :: acc) (xs, ys)
     | _ -> failwith "Impossible type unification" in
   loop acc (x, y)
 
-let unify (fixed_tv : fvmap) (a : t) (b : t) : unit =
-  unify_loop fixed_tv [a, b]
+let unify (a : t) (b : t) : unit =
+  unify_loop [a, b]
 
 let rec bprint (buf : Buffer.t) (t : t) : unit =
-  let rec walk t =
-    match unwrap_shallow t with
-      | TyVar (id, _) ->
-        Printf.bprintf buf "$%a" Z.bprint id
-      | TyPly id ->
-        Printf.bprintf buf "%a" Z.bprint id
-      | TyArr (a, r) ->
-        Printf.bprintf buf "(%a -> %a)" bprint a bprint r
-      | TyTup [] ->
-        Printf.bprintf buf "{}"
-      | TyTup (x :: xs) ->
-        Printf.bprintf buf "{ ";
-        walk x;
-        List.iter (Printf.bprintf buf ", %a" bprint) xs;
-        Printf.bprintf buf " }"
-      | TyDat ((k, _, _), []) ->
-        Buffer.add_string buf k
-      | TyDat ((k, _, _), xs) ->
-        Printf.bprintf buf "(%s" k;
-        List.iter (Printf.bprintf buf " %a" bprint) xs;
-        Printf.bprintf buf ")" in
+  let rec walk = function
+    | TyVar { contents = Link _ } as t ->
+      t |> unwrap_shallow |> walk
+    | TyVar { contents = Unbound (id, _) } ->
+      Printf.bprintf buf "$%a" Z.bprint id
+    | TyPly (id, _) ->
+      Printf.bprintf buf "%a" Z.bprint id
+    | TyArr (a, r) ->
+      Printf.bprintf buf "(%a -> %a)" bprint a bprint r
+    | TyTup [] ->
+      Printf.bprintf buf "{}"
+    | TyTup (x :: xs) ->
+      Printf.bprintf buf "{ ";
+      walk x;
+      List.iter (Printf.bprintf buf ", %a" bprint) xs;
+      Printf.bprintf buf " }"
+    | TyDat ((k, _, _), []) ->
+      Buffer.add_string buf k
+    | TyDat ((k, _, _), xs) ->
+      Printf.bprintf buf "(%s" k;
+      List.iter (Printf.bprintf buf " %a" bprint) xs;
+      Printf.bprintf buf ")" in
   walk t
 
 let to_string (t : t) : string =
