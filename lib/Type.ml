@@ -173,12 +173,25 @@ let rec bprint (buf : Buffer.t) (t : t) : unit =
   let rec walk = function
     | TyVar { contents = Link _ } as t ->
       t |> unwrap_shallow |> walk
+    | TyArr (a, r) ->
+      walk_app a;
+      Printf.bprintf buf " -> ";
+      walk r
+    | t -> walk_app t
+  and walk_app = function
+    | TyVar { contents = Link _ } as t ->
+      t |> unwrap_shallow |> walk_app
+    | TyDat ((k, _, _), (_ :: _ as xs)) ->
+      Printf.bprintf buf "%s" k;
+      List.iter (fun x -> Printf.bprintf buf " "; walk_atom x) xs;
+    | t -> walk_atom t
+  and walk_atom = function
+    | TyVar { contents = Link _ } as t ->
+      t |> unwrap_shallow |> walk
     | TyVar { contents = Unbound (id, _) } ->
       Printf.bprintf buf "$%a" Z.bprint id
     | TyPly (id, _) ->
       Printf.bprintf buf "%a" Z.bprint id
-    | TyArr (a, r) ->
-      Printf.bprintf buf "(%a -> %a)" bprint a bprint r
     | TyTup [] ->
       Printf.bprintf buf "{}"
     | TyTup (x :: xs) ->
@@ -188,9 +201,9 @@ let rec bprint (buf : Buffer.t) (t : t) : unit =
       Printf.bprintf buf " }"
     | TyDat ((k, _, _), []) ->
       Buffer.add_string buf k
-    | TyDat ((k, _, _), xs) ->
-      Printf.bprintf buf "(%s" k;
-      List.iter (Printf.bprintf buf " %a" bprint) xs;
+    | t ->
+      Printf.bprintf buf "(";
+      walk t;
       Printf.bprintf buf ")" in
   walk t
 
