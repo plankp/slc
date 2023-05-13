@@ -83,27 +83,15 @@ let rec subst (m : t IdMap.t) : t -> t = function
   | TyDat (k, xs) -> TyDat (k, List.map (subst m) xs)
   | TyPly (id, _) as t -> m |> IdMap.find_opt id |> Option.value ~default:t
 
-let gen (level : level) (t : t) : t =
-  let map = Hashtbl.create 16 in
-  let next_id = ref Z.zero in
-  let rec walk = function
-    | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> walk
-    | TyPly _ -> failwith "Invalid existing polytype when generalizing"
-    | TyArr (a, r) -> TyArr (walk a, walk r)
-    | TyTup xs -> TyTup (List.map walk xs)
-    | TyDat (k, xs) -> TyDat (k, List.map walk xs)
-    | TyVar { contents = Unbound (n, l) } as t ->
-      if Z.compare l level <= 0 then t
-      else
-        match Hashtbl.find_opt map n with
-          | Some t -> t
-          | _ ->
-            let name = !next_id in
-            let t = TyPly (name, level) in
-            next_id := Z.succ name;
-            Hashtbl.add map n t;
-            t in
-  walk t
+let rec gen (level : level) : t -> t = function
+  | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> gen level
+  | TyPly _ -> failwith "Invalid existing polytype when generalizing"
+  | TyArr (a, r) -> TyArr (gen level a, gen level r)
+  | TyTup xs -> TyTup (List.map (gen level) xs)
+  | TyDat (k, xs) -> TyDat (k, List.map (gen level) xs)
+  | TyVar { contents = Unbound (n, l) } as t ->
+    if Z.compare l level <= 0 then t
+    else TyPly (n, level)
 
 let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
   | TyVar { contents = Link _ } as t ->
@@ -169,7 +157,9 @@ and loop_tail acc x y =
 let unify (a : t) (b : t) : unit =
   unify_loop [a, b]
 
-let rec bprint (buf : Buffer.t) (t : t) : unit =
+let bprint (buf : Buffer.t) (t : t) : unit =
+  let map = Hashtbl.create 32 in
+  let next_id = ref Z.one in
   let rec walk = function
     | TyVar { contents = Link _ } as t ->
       t |> unwrap_shallow |> walk
@@ -190,14 +180,22 @@ let rec bprint (buf : Buffer.t) (t : t) : unit =
       t |> unwrap_shallow |> walk
     | TyVar { contents = Unbound (id, _) } ->
       Printf.bprintf buf "$%a" Z.bprint id
-    | TyPly (id, _) ->
-      Printf.bprintf buf "%a" Z.bprint id
+    | TyPly n ->
+      let n = match Hashtbl.find_opt map n with
+        | Some n -> n
+        | None ->
+          let id = !next_id in
+          let name = Printf.sprintf "t%a" Z.sprint id in
+          Hashtbl.add map n name;
+          next_id := Z.succ id;
+          name in
+      Printf.bprintf buf "%s" n
     | TyTup [] ->
       Printf.bprintf buf "{}"
     | TyTup (x :: xs) ->
       Printf.bprintf buf "{ ";
       walk x;
-      List.iter (Printf.bprintf buf ", %a" bprint) xs;
+      List.iter (fun x -> Printf.bprintf buf ", "; walk x) xs;
       Printf.bprintf buf " }"
     | TyDat ((k, _, _), []) ->
       Buffer.add_string buf k
