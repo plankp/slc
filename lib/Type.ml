@@ -93,6 +93,19 @@ let rec gen (level : level) : t -> t = function
     if Z.compare l level <= 0 then t
     else TyPly (n, level)
 
+let rec drop_level (l2 : level) : t -> unit = function
+  | TyVar { contents = Link _ } as t ->
+    t |> unwrap_shallow |> drop_level l2
+  | TyVar ({ contents = Unbound (n, l1) } as r) ->
+    if Z.compare l2 l1 < 0 then
+      r := Unbound (n, l2)
+  | TyPly _ -> ()
+  | TyArr (p, q) ->
+    drop_level l2 p;
+    drop_level l2 q
+  | TyTup xs | TyDat (_, xs) ->
+    List.iter (drop_level l2) xs
+
 let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
   | TyVar { contents = Link _ } as t ->
     t |> unwrap_shallow |> occurs_unify cell l2

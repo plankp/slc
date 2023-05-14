@@ -143,6 +143,22 @@ let rec check_pat t binds s = function
 
       | _ -> Error ("Unrecognized data constructor " ^ k)
 
+let rec is_value = function
+  | Ast.EVar _ | Ast.ELam _ | Ast.ELamCase _ -> true
+  | Ast.ETup xs | Ast.ECons (_, _, xs) -> List.for_all is_value xs
+  | Ast.ETyped (e, _) -> is_value e
+  | ECase (e, xs) when is_value e ->
+    List.for_all (fun (_, e) -> is_value e) xs
+  | Ast.ELet (bs, e) | Ast.ERec (bs, e) when is_value e ->
+    List.for_all (function
+      | Ast.BValue (_, [], e) -> is_value e
+      | Ast.BAnnot _ | Ast.BValue _ -> true) bs
+  | _ -> false
+
+let is_value_binder_rhs = function
+  | [[], e] -> is_value e
+  | _ -> true
+
 let rec check_expr s = function
   | Ast.EVar n -> begin
     match M.find_opt n s.venv with
@@ -263,6 +279,9 @@ and check_binders recur s g =
     | (n, _, mat) :: xs ->
       let s = { rhs_s with level = Type.incr_level rhs_s.level } in
       let< t = check_binder_rhs s mat in
+      (* value restriction *)
+      if not (is_value_binder_rhs mat) then
+        Type.drop_level rhs_s.level t;
       eval_binders ((n, t) :: acc) rhs_s xs in
 
   let rec fill_annots s' = function
