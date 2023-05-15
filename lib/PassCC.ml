@@ -32,9 +32,10 @@ let rec cc r id =
         body := LetProj (esc, slot, id_envp, ref (!body));
         slot + 1) esc 0 in
 
-      r := LetPack (id_pack, S.elements esc, ref (
+      let elts = esc |> S.elements |> List.map (fun v -> (false, v)) in
+      r := LetPack (id_pack, elts, ref (
             LetFun ((f, args @ [id_envp], k, h, body), ref (
-              LetPack (f, [f; id_pack], e)))));
+              LetPack (f, [(false, f); (false, id_pack)], e)))));
 
       (* LetFun is NOT recursive *)
       let (id, fv2) = cc e id in
@@ -70,8 +71,8 @@ let rec cc r id =
 
       let bs = List.map (fun (f, args, k, h, body) ->
         let (new_body, slot) = List.fold_left (fun (body, slot) (f, _, _, _, _) ->
-          (ref (LetProj (f, slot, id_envp,
-            ref (LetPack (f, [f; id_envp], body)))), slot + 1)) (body, 0) bs in
+          (ref (LetProj (f, slot, id_envp, ref (
+            LetPack (f, [(false, f); (false, id_envp)], body)))), slot + 1)) (body, 0) bs in
         let _ = S.fold (fun esc slot ->
           body := LetProj (esc, slot, id_envp, ref (!body));
           slot + 1) esc slot in
@@ -79,9 +80,10 @@ let rec cc r id =
 
       let fat_env = esc
         |> S.elements
-        |> List.fold_right (fun (f, _, _, _, _) xs -> f :: xs) bs in
+        |> List.map (fun v -> (false, v))
+        |> List.fold_right (fun (f, _, _, _, _) xs -> (false, f) :: xs) bs in
       let tail = List.fold_left (fun e (f, _, _, _, _) ->
-        ref (LetPack (f, [f; id_pack], e))) e bs in
+        ref (LetPack (f, [(false, f); (false, id_pack)], e))) e bs in
       r := List.fold_right (fun f tail ->
         LetFun (f, ref tail)) bs (LetPack (id_pack, fat_env, tail));
 
@@ -104,7 +106,12 @@ let rec cc r id =
 
       (id, List.fold_left (fun s v -> S.add v s) (S.singleton f) args)
 
-    | LetPack (v, elts, e) | LetCons (v, _, elts, e) ->
+    | LetPack (v, elts, e) ->
+      let (id, esc) = cc e id in
+      let esc = List.fold_left (fun s (_, v) -> S.add v s) (S.remove v esc) elts in
+      (id, esc)
+
+    | LetCons (v, _, elts, e) ->
       let (id, esc) = cc e id in
       let esc = List.fold_left (fun s v -> S.add v s) (S.remove v esc) elts in
       (id, esc)
@@ -115,6 +122,9 @@ let rec cc r id =
 
     | Case (v, _) ->
       (id, S.singleton v)
+
+    | Mutate (v1, _, v2, _) ->
+      (id, S.of_list [v1; v2])
 
 let transform e =
   let id = PassReindex.reindex e in

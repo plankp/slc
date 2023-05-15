@@ -58,7 +58,7 @@ and lower_value q label k h sv sk id buf = function
   | LetPack (v, elts, e) ->
     let width = List.length elts |> Int64.of_int |> Int64.mul 8L in
     bprintf buf "  %%v%d = call ptr @GC_MALLOC(i64 noundef %Ld)\n" v width;
-    let (id, _) = List.fold_left (fun (id, i) e ->
+    let (id, _) = List.fold_left (fun (id, i) (_, e) ->
       bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %%v%d, i64 %d\n" v id v i;
       bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find e sv) v id;
       (Int64.succ id, i + 1)) (id, 0) elts in
@@ -104,6 +104,13 @@ and lower_value q label k h sv sk id buf = function
   | Jmp (j, args) ->
     let params = M.find j sk in
     List.iter2 (fun p a -> p := (M.find a sv, label) :: !p) params args;
+    bprintf buf "  br label %%k%d\n" j;
+    q, id
+
+  (* mutation: the continuation j has to be a block without phi edges *)
+  | Mutate (v, i, u, j) ->
+    bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %s, i64 %d\n" v id (M.find v sv) i;
+    bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find u sv) v id;
     bprintf buf "  br label %%k%d\n" j;
     q, id
 

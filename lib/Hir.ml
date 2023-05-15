@@ -12,9 +12,10 @@ type term =
   | Jmp of contvar * valuevar list
   | App of valuevar * valuevar list * contvar * contvar
   | LetCons of valuevar * int * valuevar list * term ref
-  | LetPack of valuevar * valuevar list * term ref
+  | LetPack of valuevar * (bool * valuevar) list * term ref
   | LetProj of valuevar * int * valuevar * term ref
   | Case of valuevar * contvar M.t
+  | Mutate of valuevar * int * valuevar * contvar
 
 and contvar =
   int
@@ -121,7 +122,8 @@ let rec dump' (n : int) (t : term) : unit =
     | LetPack (v, elts, e) ->
       dump_prefix ();
       Printf.printf "let %%v%d = pack" v;
-      List.iter (fun v ->
+      List.iter (fun (f, v) ->
+        if f then Printf.printf " mut";
         Printf.printf " %%v%d" v) elts;
       Printf.printf " in\n";
       dump' n !e
@@ -139,6 +141,10 @@ let rec dump' (n : int) (t : term) : unit =
           | Some i -> Printf.printf " %d -> %%k%d;" i k
           | _ -> Printf.printf " _ -> %%k%d;" k) cases;
       Printf.printf " }"
+
+    | Mutate (tuple, i, v, k) ->
+      dump_prefix ();
+      Printf.printf "Mutate %%v%d %d <- %%v%d, %%k%d" tuple i v k
 
 let dump t =
   dump' 0 t

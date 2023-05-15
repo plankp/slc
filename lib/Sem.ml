@@ -389,7 +389,7 @@ let rec lower_funk e id s h k =
     | Ast.ETup xs ->
       let rec loop id acc = function
         | x :: xs ->
-          lower_funk x id s h (fun id x -> loop id (x :: acc) xs)
+          lower_funk x id s h (fun id x -> loop id ((false, x) :: acc) xs)
         | [] ->
           let name = id in
           let id, tail = k (id + 1) name in

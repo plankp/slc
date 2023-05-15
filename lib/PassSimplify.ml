@@ -37,7 +37,20 @@ let rec collect_occ s r = match !r with
     let s = bump_use DontInline s v in
     Hir.M.fold (fun _ k s -> bump_use DontInline s k) cases s
 
-  | LetPack (v, elts, next) | LetCons (v, _, elts, next) ->
+  | Mutate (v1, _, v2, k) ->
+    let s = bump_use DontInline s v1 in
+    let s = bump_use DontInline s v2 in
+    bump_use DontInline s k
+
+  | LetPack (v, elts, next) ->
+    let s = collect_occ s next in
+    if M.mem v s then
+      List.fold_left (fun s (_, v) -> bump_use DontInline s v) s elts
+    else begin
+      r := !next; s
+    end
+
+  | LetCons (v, _, elts, next) ->
     let s = collect_occ s next in
     if M.mem v s then
       List.fold_left (bump_use DontInline) s elts
@@ -127,6 +140,9 @@ let rec inline_single_use occs sbody svar r = match !r with
   | Case (v, cases) ->
     r := Case (subst svar v, Hir.M.map (subst svar) cases)
 
+  | Mutate (v1, i, v2, k) ->
+    r := Mutate (subst svar v1, i, subst svar v2, subst svar k)
+
   | LetFun ((f, params, k, h, body), next) when M.find f occs = SingleUse ->
     r := !next;
     inline_single_use occs (M.add f (k :: h :: params, body) sbody) svar r
@@ -136,7 +152,7 @@ let rec inline_single_use occs sbody svar r = match !r with
     inline_single_use occs sbody svar next
 
   | LetPack (v, elts, next) ->
-    r := LetPack (v, List.map (subst svar) elts, next);
+    r := LetPack (v, List.map (fun (n, v) -> (n, subst svar v)) elts, next);
     inline_single_use occs sbody svar next
 
   | LetProj (v, i, t, next) ->
@@ -198,12 +214,17 @@ let rec redux env r = match !r with
     let t = subst env t in
     r := LetProj (v, i, t, next);
 
+    let tail () = redux (M.add v (Term !r) env) next in
+
     match M.find_opt t env with
-      | Some (Term (LetPack (_, elts, _))) ->
-        r := !next;
-        redux (M.add v (Var (List.nth elts i)) env) r
-      | _ ->
-        redux (M.add v (Term !r) env) next
+      | Some (Term (LetPack (_, elts, _))) -> begin
+        match List.nth elts i with
+          | (false, elt) ->
+            r := !next;
+            redux (M.add v (Var elt) env) r
+          | _ -> tail ()
+      end
+      | _ -> tail ()
   end
 
   | Case (v, cases) -> begin
@@ -232,6 +253,9 @@ let rec redux env r = match !r with
   | App (f, args, k, h) ->
     r := App (subst env f, List.map (subst env) args, subst env k, subst env h)
 
+  | Mutate (v1, i, v2, k) ->
+    r := Mutate (subst env v1, i, subst env v2, subst env k)
+
   | LetCons (v, i, elts, next) ->
     let elts = List.map (subst env) elts in
     r := LetCons (v, i, elts, next);
@@ -239,7 +263,7 @@ let rec redux env r = match !r with
     redux (M.add v (Term !r) env) next
 
   | LetPack (v, elts, next) ->
-    let elts = List.map (subst env) elts in
+    let elts = List.map (fun (n, v) -> (n, subst env v)) elts in
     r := LetPack (v, elts, next);
 
     redux (M.add v (Term !r) env) next

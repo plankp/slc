@@ -98,7 +98,12 @@ let rec rewrite s r = match !r with
   | Jmp (_, xs) ->
     (M.empty, List.fold_left (fun s v -> S.add v s) S.empty xs)
 
-  | LetPack (v, xs, next) | LetCons (v, _, xs, next) ->
+  | LetPack (v, xs, next) ->
+    let (q, fv) = rewrite s next in
+    let fv = S.remove v fv in
+    (q, List.fold_left (fun s (_, v) -> S.add v s) fv xs)
+
+  | LetCons (v, _, xs, next) ->
     let (q, fv) = rewrite s next in
     let fv = S.remove v fv in
     (q, List.fold_left (fun s v -> S.add v s) fv xs)
@@ -113,6 +118,9 @@ let rec rewrite s r = match !r with
       let (q', fv') = rewrite s next in
       let fv' = List.fold_left (fun s v -> S.add v s) fv' args in
       (M.union merge q' q, S.union fv' fv)) (q, fv) bs
+
+  | Mutate (v1, _, v2, _) ->
+    (M.empty, S.of_list [v1; v2])
 
 let transform e =
   let _ = PassReindex.reindex e in

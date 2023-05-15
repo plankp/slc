@@ -68,7 +68,7 @@ let rec reindex' r sv sk id = match !r with
     reindex' e sv sk id
 
   | LetPack (v, elts, e) ->
-    let elts = List.map (fun i -> M.find i sv) elts in
+    let elts = List.map (fun (n, i) -> (n, M.find i sv)) elts in
     let v, id, sv = id, id + 1, M.add v id sv in
 
     r := LetPack (v, elts, e);
@@ -83,6 +83,10 @@ let rec reindex' r sv sk id = match !r with
 
   | Case (v, cases) ->
     r := Case (M.find v sv, Hir.M.map (fun k -> M.find k sk) cases);
+    id
+
+  | Mutate (tuple, i, v, k) ->
+    r := Mutate (M.find tuple sv, i, M.find v sv, M.find k sk);
     id
 
 let reindex = function

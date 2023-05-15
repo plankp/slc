@@ -35,7 +35,11 @@ let rec check_same_return s r = match !r with
     else if S.mem f s then Shared (k, h, r, [r])
     else Unused
 
-  | LetPack (v, elts, r) | LetCons (v, _, elts, r) ->
+  | LetPack (v, elts, r) ->
+    if List.exists (fun (_, v) -> S.mem v s) elts then Divergent
+    else check_same_return (S.remove v s) r
+
+  | LetCons (v, _, elts, r) ->
     if List.exists (fun v -> S.mem v s) elts then Divergent
     else check_same_return (S.remove v s) r
 
@@ -67,6 +71,9 @@ let rec check_same_return s r = match !r with
   | Case (v, _) ->
     if S.mem v s then Divergent else Unused
 
+  | Mutate (v1, _, v2, _) ->
+    if S.mem v1 s || S.mem v2 s then Divergent else Unused
+
 let rec rewrite_jmp = function
   | { contents = App (f, args, _, _) } as r :: xs ->
     r := Jmp (f, args);
@@ -84,15 +91,22 @@ let rec contify r = match !r with
     List.fold_left (fun s (_, v) -> S.add v s) S.empty xs
 
   | Jmp (_, args) ->
-    List.fold_left (fun s v -> S.add v s) S.empty args
+    S.of_list args
 
   | App (f, args, _, _) ->
-    List.fold_left (fun s v -> S.add v s) (S.singleton f) args
+    S.of_list (f :: args)
 
   | Case (v, _) ->
     S.singleton v
 
-  | LetPack (v, elts, r) | LetCons (v, _, elts, r) ->
+  | Mutate (v1, _, v2, _) ->
+    S.of_list [v1; v2]
+
+  | LetPack (v, elts, r) ->
+    let s = contify r |> S.remove v in
+    List.fold_left (fun s (_, v) -> S.add v s) s elts
+
+  | LetCons (v, _, elts, r) ->
     let s = contify r |> S.remove v in
     List.fold_left (fun s v -> S.add v s) s elts
 
@@ -267,6 +281,14 @@ let rec fold_cont s r flag = match !r with
         | None -> k
         | Some k -> modified := true; k) cases);
     !modified
+  end
+
+  | Mutate (v1, i, v2, k) -> begin
+    match M.find_opt k s with
+      | Some k ->
+        r := Mutate (v1, i, v2, k);
+        true
+      | _ -> flag
   end
 
   | LetCont (bs, next) -> begin

@@ -66,6 +66,9 @@ let rec transform s r = match !r with
   | Case (v, cases) ->
     s |> S.add v |> Hir.M.fold (fun _ -> S.add) cases
 
+  | Mutate (v1, _, v2, k) ->
+    s |> S.add v1 |> S.add v2 |> S.add k
+
   | LetFun ((f, _, _, _, body), next) ->
     let s = transform s next in
     if S.mem f s then
@@ -74,7 +77,15 @@ let rec transform s r = match !r with
       r := !next; s
     end
 
-  | LetPack (v, elts, next) | LetCons (v, _, elts, next) ->
+  | LetPack (v, elts, next) ->
+    let s = transform s next in
+    if S.mem v s then
+      List.fold_left (fun s (_, v) -> S.add v s) s elts
+    else begin
+      r := !next; s
+    end
+
+  | LetCons (v, _, elts, next) ->
     let s = transform s next in
     if S.mem v s then
       List.fold_left (fun s v -> S.add v s) s elts
