@@ -95,6 +95,26 @@ let rec check_texpr allow_fresh s = function
 
       | _ -> Error ("Type constructor " ^ k ^ " not found")
 
+let lookup_data_ctor t s k =
+  match Type.unwrap_shallow t with
+    | TyDat ((_, polys, m) as d, targs) -> begin
+      match Hashtbl.find_opt m k with
+        | None -> Error ("Unrecognized data constructor " ^ k)
+        | Some (_, params) ->
+          let penv = List.fold_left2 (fun penv p t ->
+            Type.IdMap.add p t penv) Type.IdMap.empty polys targs in
+          Ok (d, params, penv)
+    end
+    | _ ->
+      match M.find_opt k s.venv with
+        | Some (Ctor ((_, polys, _) as d, params)) ->
+          let (targs, penv) = List.fold_right (fun p (xs, penv) ->
+            let t = Type.new_tyvar s.level in
+            (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
+          Type.unify t (Type.TyDat (d, targs));
+          Ok (d, params, penv)
+        | _ -> Error ("Unrecognized data constructor " ^ k)
+
 let rec check_pat t binds s = function
   | Ast.PIgn -> Ok (binds, s)
 
@@ -111,37 +131,32 @@ let rec check_pat t binds s = function
     check_pat t' binds s p
 
   | Ast.PTup xs ->
-    let rec loop elts binds s = function
+    let rec walk_subpat binds s = function
+      | [] -> Ok (binds, s)
+      | (x, t) :: xs ->
+        let< (binds, s) = check_pat t binds s x in
+        walk_subpat binds s xs in
+    let rec fill_tyvars acc = function
       | [] ->
-        Type.unify t (Type.TyTup (List.rev elts));
-        Ok (binds, s)
+        Type.unify t (Type.TyTup (List.rev_map snd acc));
+        walk_subpat binds s acc
       | x :: xs ->
         let t = Type.new_tyvar s.level in
-        let< (binds, s) = check_pat t binds s x in
-        loop (t :: elts) binds s xs in
-    loop [] binds s xs
+        fill_tyvars ((x, t) :: acc) xs in
+    fill_tyvars [] xs
 
   | Ast.PDecons (k, dinfo, args) ->
-    match M.find_opt k s.venv with
-      | Some (Ctor ((_, polys, _) as d, params)) ->
-        let (targs, penv) = List.fold_right (fun p (xs, penv) ->
-          let t = Type.new_tyvar s.level in
-          (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
-
-        Type.unify t (Type.TyDat (d, targs));
-
-        let rec loop binds s = function
-          | [], [] ->
-            dinfo := d;
-            Ok (binds, s)
-          | param :: xs, arg :: ys ->
-            let param = Type.subst penv param in
-            let< (binds, s) = check_pat param binds s arg in
-            loop binds s (xs, ys)
-          | _ -> Error "Data constructor argument length mismatch" in
-        loop binds s (params, args)
-
-      | _ -> Error ("Unrecognized data constructor " ^ k)
+    let< (d, params, penv) = lookup_data_ctor t s k in
+    let rec loop binds s = function
+      | [], [] ->
+        dinfo := d;
+        Ok (binds, s)
+      | param :: xs, arg :: ys ->
+        let param = Type.subst penv param in
+        let< (binds, s) = check_pat param binds s arg in
+        loop binds s (xs, ys)
+      | _ -> Error "Data constructor argument length mismatch" in
+    loop binds s (params, args)
 
 let rec is_value = function
   | Ast.EVar _ | Ast.ELam _ | Ast.ELamCase _ -> true
