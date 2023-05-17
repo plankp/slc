@@ -7,6 +7,7 @@ open Ast
 %token LCURLY RCURLY
 %token SLASH ARROW
 %token DATA BAR
+%token REF ST LD
 %token LET REC SET IN AND
 %token CASE OF IGNORE BIND
 %token COLON
@@ -55,7 +56,8 @@ texpr:
   | e = texpr_app { e }
 
 texpr_app:
-  | k = UNAME; a = texpr_atom+ { TECons (k, a) }
+  | REF a = texpr_atom { TERef a }
+  | k = UNAME a = texpr_atom+ { TECons (k, a) }
   | e = texpr_atom { e }
 
 texpr_atom:
@@ -76,7 +78,7 @@ expr:
   | LET b = binders IN e = expr { ELet (b, e) }
   | REC b = binders IN e = expr { ERec (b, e) }
   | CASE e = expr OF k = cases { ECase (e, k) }
-  | e = expr_cons COLON t = texpr { ETyped (e, t) }
+  | l = expr_cons ST r = expr { EAssign (l, r) }
   | e = expr_cons { e }
 
 expr_cons:
@@ -101,7 +103,6 @@ case:
   | p = pattern ARROW e = expr { (p, e) }
 
 pattern:
-  | e = pattern_cons COLON t = texpr { PTyped (e, t) }
   | e = pattern_cons { e }
 
 pattern_cons:
@@ -111,13 +112,15 @@ pattern_cons:
   | p = pattern_app { p }
 
 pattern_app:
+  | REF a = pattern_atom { PDeref a }
   | k = UNAME; a = pattern_atom+ { PDecons (k, ref Type.datadef_Void, a) }
   | e = pattern_atom { e }
 
 pattern_atom:
-  | LPAREN; e = pattern; RPAREN { e }
-  | LCURLY; e = patterns; RCURLY { PTup e }
-  | LSQUARE; e = patterns; RSQUARE {
+  | LPAREN e = pattern RPAREN { e }
+  | LPAREN e = pattern COLON t = texpr RPAREN { PTyped (e, t) }
+  | LCURLY e = patterns RCURLY { PTup e }
+  | LSQUARE e = patterns RSQUARE {
     let tl = PDecons ("[]", ref Type.datadef_Void, []) in
     List.fold_right (fun hd tl ->
       PDecons ("::", ref Type.datadef_Void, [hd; tl])) e tl
@@ -133,20 +136,23 @@ patterns:
   | { [] }
 
 expr_app:
+  | REF a = expr_atom { ERef a }
   | k = UNAME; a = expr_atom+ { ECons (k, ref Type.datadef_Void, a) }
   | f = expr_atom; a = expr_atom+ { EApp (f, a) }
   | e = expr_atom { e }
 
 expr_atom:
-  | LPAREN; e = expr; RPAREN { e }
-  | LCURLY; e = exprs; RCURLY { ETup e }
-  | LSQUARE; e = exprs; RSQUARE {
+  | LPAREN e = expr COLON t = texpr RPAREN { ETyped (e, t) }
+  | LPAREN e = expr RPAREN { e }
+  | LCURLY e = exprs RCURLY { ETup e }
+  | LSQUARE e = exprs RSQUARE {
     let tl = ECons ("[]", ref Type.datadef_Void, []) in
     List.fold_right (fun hd tl ->
       ECons ("::", ref Type.datadef_Void, [hd; tl])) e tl
   }
   | n = UNAME { ECons (n, ref Type.datadef_Void, []) }
   | e = LNAME { EVar e }
+  | e = expr_atom LD { EDeref e }
 
 exprs:
   | x = expr; COMMA; xs = exprs { x :: xs }

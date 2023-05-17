@@ -6,6 +6,7 @@ type t =
   | TyArr of t * t
   | TyTup of t list
   | TyDat of datadef * t list
+  | TyRef of t
 
 and tyvar =
   | Unbound of tname
@@ -54,6 +55,7 @@ let rec has_free_tv : t -> bool = function
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> has_free_tv
   | TyVar _ -> true
   | TyPly _ -> false
+  | TyRef t -> has_free_tv t
   | TyArr (a, r) -> if has_free_tv a then true else has_free_tv r
   | TyTup xs | TyDat (_, xs) -> List.exists has_free_tv xs
 
@@ -62,6 +64,7 @@ let inst (level : level) (t : t) : t =
   let rec walk = function
     | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> walk
     | TyVar _ as t -> t
+    | TyRef t -> TyRef (walk t)
     | TyArr (a, r) -> TyArr (walk a, walk r)
     | TyTup xs -> TyTup (List.map walk xs)
     | TyDat (k, xs) -> TyDat (k, List.map walk xs)
@@ -78,6 +81,7 @@ let rec subst (m : t IdMap.t) : t -> t = function
   | t when IdMap.is_empty m -> t
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> subst m
   | TyVar _ as t -> t
+  | TyRef t -> TyRef (subst m t)
   | TyArr (a, r) -> TyArr (subst m a, subst m r)
   | TyTup xs -> TyTup (List.map (subst m) xs)
   | TyDat (k, xs) -> TyDat (k, List.map (subst m) xs)
@@ -86,6 +90,7 @@ let rec subst (m : t IdMap.t) : t -> t = function
 let rec gen (level : level) : t -> t = function
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> gen level
   | TyPly _ -> failwith "Invalid existing polytype when generalizing"
+  | TyRef t -> TyRef (gen level t)
   | TyArr (a, r) -> TyArr (gen level a, gen level r)
   | TyTup xs -> TyTup (List.map (gen level) xs)
   | TyDat (k, xs) -> TyDat (k, List.map (gen level) xs)
@@ -100,6 +105,8 @@ let rec drop_level (l2 : level) : t -> unit = function
     if Z.compare l2 l1 < 0 then
       r := Unbound (n, l2)
   | TyPly _ -> ()
+  | TyRef t ->
+    drop_level l2 t
   | TyArr (p, q) ->
     drop_level l2 p;
     drop_level l2 q
@@ -117,6 +124,8 @@ let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
   | TyPly (_, l1) ->
     if Z.compare l1 l2 >= 0 then
       failwith "Unification cause rigid type variable to escape its scope"
+  | TyRef t ->
+    occurs_unify cell l2 t
   | TyArr (p, q) ->
     occurs_unify cell l2 p;
     occurs_unify cell l2 q
@@ -148,6 +157,9 @@ let rec unify_loop : (t * t) list -> unit = function
 
       | TyPly a, TyPly b when a = b ->
         unify_loop xs
+
+      | TyRef a, TyRef b ->
+        unify_loop ((a, b) :: xs)
 
       | TyArr (a1, r1), TyArr (a2, r2) ->
         unify_loop ((a1, a2) :: (r1, r2) :: xs)
@@ -187,6 +199,9 @@ let bprint (buf : Buffer.t) (t : t) : unit =
     | TyDat ((k, _, _), (_ :: _ as xs)) ->
       Printf.bprintf buf "%s" k;
       List.iter (fun x -> Printf.bprintf buf " "; walk_atom x) xs;
+    | TyRef t ->
+      Printf.bprintf buf "ref ";
+      walk_atom t
     | t -> walk_atom t
   and walk_atom = function
     | TyVar { contents = Link _ } as t ->

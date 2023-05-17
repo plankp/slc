@@ -22,6 +22,8 @@ rule read = parse
   | '@'       { BIND }
   | '\\'      { SLASH }
   | "->"      { ARROW }
+  | ":="      { ST }
+  | '^'       { LD }
   | "::"      { CONS }
   | ':'       { COLON }
   | '='       { SET }
@@ -35,6 +37,7 @@ rule read = parse
   | "of"      { OF }
   | "data"    { DATA }
   | "export"  { EXPORT }
+  | "ref"     { REF }
 
   | lname     { LNAME (Lexing.lexeme lexbuf) }
   | uname     { UNAME (Lexing.lexeme lexbuf) }

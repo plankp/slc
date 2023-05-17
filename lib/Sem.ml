@@ -69,6 +69,10 @@ let rec check_texpr allow_fresh s = function
         Ok ({ s with tenv = M.add n (Value t) s.tenv }, t)
   end
 
+  | Ast.TERef e ->
+    let< (s, e) = check_texpr allow_fresh s e in
+    Ok (s, Type.TyRef e)
+
   | Ast.TEArr (a, r) ->
     let< (s, a) = check_texpr allow_fresh s a in
     let< (s, r) = check_texpr allow_fresh s r in
@@ -128,6 +132,11 @@ let rec check_pat t binds s = function
   | Ast.PTyped (p, t') ->
     let< (s, t') = check_texpr true s t' in
     Type.unify t t';
+    check_pat t' binds s p
+
+  | Ast.PDeref p ->
+    let t' = Type.new_tyvar s.level in
+    Type.unify t (Type.TyRef t');
     check_pat t' binds s p
 
   | Ast.PTup xs ->
@@ -210,6 +219,22 @@ let rec check_expr s = function
         let< t = check_expr s x in
         loop (t :: elts) xs in
     loop [] xs
+
+  | Ast.ERef e ->
+    let< e = check_expr s e in
+    Ok (Type.TyRef e)
+
+  | Ast.EAssign (d, v) ->
+    let< d = check_expr s d in
+    let< v = check_expr s v in
+    Type.unify d (Type.TyRef v);
+    Ok (Type.TyTup [])
+
+  | Ast.EDeref e ->
+    let< e = check_expr s e in
+    let t = Type.new_tyvar s.level in
+    Type.unify e (Type.TyRef t);
+    Ok t
 
   | Ast.EApp (f, xs) ->
     let rec loop t1 = function
@@ -401,6 +426,26 @@ let rec lower_funk e id s h k =
       lower_rec_binder b id s h (fun id s ->
         lower_funk e id s h k)
 
+    | Ast.ERef x ->
+      lower_funk x id s h (fun id x ->
+        let name = id in
+        let id, tail = k (id + 1) name in
+        (id, LetPack (name, [(true, x)], ref tail)))
+
+    | Ast.EAssign (d, v) ->
+      lower_funk v id s h (fun id v ->
+        lower_funk d id s h (fun id d ->
+          let name, id = id, id + 1 in
+          let id, tail = k id name in
+          (id, LetCont ([name, [], ref (LetPack (name, [], ref tail))], ref (
+                Mutate (d, 0, v, name))))))
+
+    | Ast.EDeref v ->
+      lower_funk v id s h (fun id v ->
+        let name, id = id, id + 1 in
+        let id, tail = k id name in
+        (id, LetProj (name, 0, v, ref tail)))
+
     | Ast.ETup xs ->
       let rec loop id acc = function
         | x :: xs ->
@@ -543,6 +588,29 @@ and lower_case v id cases h k =
     | ((p, s, e) :: xs) as rows ->
       (* currently expands by the left-most decons term on the first row *)
       let rec loop vinit pinit s = function
+        | v :: vs, Ast.PDeref u :: ps ->
+          (* As far as the backend is concerned, this is no different from a
+           * tuple pattern of a single element *)
+          let start = id in
+          let scrut = v in
+          let xs = List.map (fun (p, s, e) ->
+            let rec coiter pinit s = function
+              | [], Ast.PIgn :: ps ->
+                (List.rev_append pinit (Ast.PIgn :: ps), s, e)
+              | [], Ast.PDeref v :: ps ->
+                (List.rev_append pinit (v :: ps), s, e)
+              | [], Ast.PVar (n, p) :: ps ->
+                coiter pinit (M.add n v s) ([], p :: ps)
+              | [], Ast.PTyped (p, _) :: ps ->
+                coiter pinit s ([], p :: ps)
+              | _ :: xs, p :: ps ->
+                coiter (p :: pinit) s (xs, ps)
+              | _ -> failwith "PATTERN MATRIX DIMENSION MISMATCH" in
+            coiter [] s (vinit, p)) xs in
+          let v = List.rev_append vinit (id :: vs) in
+          let p = List.rev_append pinit (u :: ps) in
+          let (id, term) = lower_case v (id + 1) ((p, s, e) :: xs) h k in
+          (id, LetProj (start, 0, scrut, ref term))
         | v :: vs, Ast.PTup elts :: ps ->
           (* Transform:
            *   case v of { p1, p2, ... } -> e
