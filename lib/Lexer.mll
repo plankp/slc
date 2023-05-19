@@ -24,6 +24,8 @@ rule read = parse
   | "->"      { ARROW }
   | ":="      { ST }
   | '^'       { LD }
+  | '+'       { ADD }
+  | '-'       { SUB }
   | "::"      { CONS }
   | ':'       { COLON }
   | '='       { SET }

@@ -346,11 +346,15 @@ and check_binders recur s g =
 let check_data_def s b =
   let m = Hashtbl.create 16 in
   let ctors = List.map (fun (n, targs, _) ->
-    let (_, targs, env) = List.fold_left (fun (v, xs, m) a ->
+    let (_, targs, env) = List.fold_left (fun (v, xs, m) (vannot, a) ->
       let m = M.update a (function
         | None -> Some (Value (Type.TyPly (v, Z.zero)))
         | _ -> failwith "Illegal duplicate type argument in same data definition") m in
-      (Z.succ v, (v, Type.Invariant) :: xs, m)) (Z.zero, [], M.empty) targs in
+      let variance = match vannot with
+        | None -> Type.Invariant
+        | Some true -> Type.Covariant
+        | Some false -> Type.Contravariant in
+      (Z.succ v, (v, variance) :: xs, m)) (Z.zero, [], M.empty) targs in
 
     let mapping = Hashtbl.create 16 in
     let self = (n, List.rev targs, mapping) in
@@ -373,6 +377,8 @@ let check_data_def s b =
         match check_texpr false s t with
           | Error e -> failwith e
           | Ok (_, t) -> t) args)) cases) b;
+
+  List.iter Type.check_datadef_variance ctors;
 
   ctors
 

@@ -8,6 +8,7 @@ open Ast
 %token SLASH ARROW
 %token DATA BAR
 %token REF ST LD
+%token ADD SUB
 %token LET REC SET IN AND
 %token CASE OF IGNORE BIND
 %token COLON
@@ -42,7 +43,12 @@ datadefs:
   | x = datadef { [x] }
 
 datadef:
-  | n = UNAME; a = LNAME*; SET; BAR?; xs = data_entries { (n, a, xs) }
+  | n = UNAME; a = datapoly*; SET; BAR?; xs = data_entries { (n, a, xs) }
+
+datapoly:
+  | ADD a = LNAME { (Some true, a) }
+  | SUB a = LNAME { (Some false, a) }
+  | a = LNAME { (None, a) }
 
 data_entries:
   | x = data_entry; BAR; xs = data_entries { x :: xs }

@@ -8,7 +8,7 @@ and root =
   | RExpr of expr
 
 and datadef =
-  string * string list * (string * texpr list) list
+  string * (bool option * string) list * (string * texpr list) list
 
 and expr =
   | EVar of string

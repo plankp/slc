@@ -103,6 +103,46 @@ let rec gen (level : level) : t -> t = function
     if Z.compare l level <= 0 then t
     else TyPly (n, level)
 
+let check_datadef_variance ((_, targs, cases) : datadef) : unit =
+  let enter_variance from ctx = match from, ctx with
+    | Invariant, _ | _, Invariant -> Invariant
+    | _, Covariant -> from
+    | Covariant, Contravariant -> Contravariant
+    | Contravariant, Contravariant -> Covariant in
+
+  let m = Hashtbl.create 16 in
+  let rec walk ctx = function
+    | TyVar { contents = Link _ } as t ->
+      t |> unwrap_shallow |> walk ctx
+    | TyPly (n, v) when Z.equal Z.zero v -> begin
+      match Hashtbl.find_opt m n, ctx with
+        | None, _
+        | Some Invariant, _
+        | Some Covariant, Covariant
+        | Some Contravariant, Contravariant -> ()
+        | Some _, Invariant ->
+          failwith "Usage requires invariant"
+        | Some _, Contravariant ->
+          failwith "Usage requires contravariant"
+        | Some _, Covariant ->
+          failwith "Usage requires covariant"
+    end
+    | TyVar _ -> ()
+    | TyPly _ -> ()
+    | TyRef t -> walk Invariant t
+    | TyArr (a, r) ->
+      walk (enter_variance ctx Contravariant) a;
+      walk ctx r
+    | TyTup xs ->
+      List.iter (walk ctx) xs
+    | TyDat ((_, params, _), xs) ->
+      List.iter2 (fun (_, v) ->
+        walk (enter_variance ctx v)) params xs in
+
+  List.iter (fun (n, v) -> Hashtbl.add m n v) targs;
+  Hashtbl.iter (fun _ (_, sites) ->
+    List.iter (walk Covariant) sites) cases
+
 let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = function
   | TyVar { contents = Link _ } as t ->
     t |> unwrap_shallow |> drop_dangerous_level' l2 dangerous
