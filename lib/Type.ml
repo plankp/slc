@@ -19,14 +19,19 @@ and level =
   Z.t
 
 and datadef =
-  string * Z.t list * (string, int * t list) Hashtbl.t
+  string * (Z.t * variance) list * (string, int * t list) Hashtbl.t
+
+and variance =
+  | Covariant
+  | Contravariant
+  | Invariant
 
 let datadef_Void : datadef =
   ("Void", [], Hashtbl.create 0)
 
 let datadef_List : datadef =
   let m = Hashtbl.create 2 in
-  let self = ("List", [Z.zero], m) in
+  let self = ("List", [Z.zero, Covariant], m) in
   let t0 = TyPly (Z.zero, Z.zero) in
   Hashtbl.add m "[]" (0, []);
   Hashtbl.add m "::" (1, [t0; (TyDat (self, [t0]))]);
@@ -98,20 +103,27 @@ let rec gen (level : level) : t -> t = function
     if Z.compare l level <= 0 then t
     else TyPly (n, level)
 
-let rec drop_level (l2 : level) : t -> unit = function
+let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = function
   | TyVar { contents = Link _ } as t ->
-    t |> unwrap_shallow |> drop_level l2
+    t |> unwrap_shallow |> drop_dangerous_level' l2 dangerous
   | TyVar ({ contents = Unbound (n, l1) } as r) ->
-    if Z.compare l2 l1 < 0 then
+    if dangerous && Z.compare l2 l1 < 0 then
       r := Unbound (n, l2)
   | TyPly _ -> ()
   | TyRef t ->
-    drop_level l2 t
+    drop_dangerous_level' l2 true t
   | TyArr (p, q) ->
-    drop_level l2 p;
-    drop_level l2 q
-  | TyTup xs | TyDat (_, xs) ->
-    List.iter (drop_level l2) xs
+    drop_dangerous_level' l2 true p;
+    drop_dangerous_level' l2 dangerous q
+  | TyTup xs ->
+    List.iter (drop_dangerous_level' l2 dangerous) xs
+  | TyDat ((_, params, _), xs) ->
+    List.iter2 (function
+      | (_, Covariant) -> drop_dangerous_level' l2 dangerous
+      | _ -> drop_dangerous_level' l2 true) params xs
+
+let drop_dangerous_level (l2 : level) (t : t) : unit =
+  drop_dangerous_level' l2 false t
 
 let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
   | TyVar { contents = Link _ } as t ->

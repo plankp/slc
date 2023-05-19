@@ -105,14 +105,14 @@ let lookup_data_ctor t s k =
       match Hashtbl.find_opt m k with
         | None -> Error ("Unrecognized data constructor " ^ k)
         | Some (_, params) ->
-          let penv = List.fold_left2 (fun penv p t ->
+          let penv = List.fold_left2 (fun penv (p, _) t ->
             Type.IdMap.add p t penv) Type.IdMap.empty polys targs in
           Ok (d, params, penv)
     end
     | _ ->
       match M.find_opt k s.venv with
         | Some (Ctor ((_, polys, _) as d, params)) ->
-          let (targs, penv) = List.fold_right (fun p (xs, penv) ->
+          let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
             let t = Type.new_tyvar s.level in
             (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
           Type.unify t (Type.TyDat (d, targs));
@@ -193,7 +193,7 @@ let rec check_expr s = function
   | Ast.ECons (k, dinfo, args) -> begin
     match M.find_opt k s.venv with
       | Some (Ctor ((_, polys, _) as d, params)) ->
-        let (targs, penv) = List.fold_right (fun p (xs, penv) ->
+        let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
           let t = Type.new_tyvar s.level in
           (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
 
@@ -321,7 +321,7 @@ and check_binders recur s g =
       let< t = check_binder_rhs s mat in
       (* value restriction *)
       if not (is_value_binder_rhs mat) then
-        Type.drop_level rhs_s.level t;
+        Type.drop_dangerous_level rhs_s.level t;
       eval_binders ((n, t) :: acc) rhs_s xs in
 
   let rec fill_annots s' = function
@@ -350,7 +350,7 @@ let check_data_def s b =
       let m = M.update a (function
         | None -> Some (Value (Type.TyPly (v, Z.zero)))
         | _ -> failwith "Illegal duplicate type argument in same data definition") m in
-      (Z.succ v, v :: xs, m)) (Z.zero, [], M.empty) targs in
+      (Z.succ v, (v, Type.Invariant) :: xs, m)) (Z.zero, [], M.empty) targs in
 
     let mapping = Hashtbl.create 16 in
     let self = (n, List.rev targs, mapping) in
