@@ -220,6 +220,14 @@ let rec check_expr s = function
         loop (t :: elts) xs in
     loop [] xs
 
+  | Ast.ESeq (x, xs) ->
+    let rec loop x = function
+      | [] -> check_expr s x
+      | y :: ys ->
+        let< _ = check_expr s x in
+        loop y ys in
+    loop x xs
+
   | Ast.ERef e ->
     let< e = check_expr s e in
     Ok (Type.TyRef e)
@@ -451,6 +459,12 @@ let rec lower_funk e id s h k =
         let name, id = id, id + 1 in
         let id, tail = k id name in
         (id, LetProj (name, 0, v, ref tail)))
+
+    | Ast.ESeq (x, xs) ->
+      let rec loop id x = function
+        | y :: ys -> lower_funk x id s h (fun id _ -> loop id y ys)
+        | [] -> lower_funk x id s h k in
+      loop id x xs
 
     | Ast.ETup xs ->
       let rec loop id acc = function

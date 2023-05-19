@@ -31,6 +31,7 @@ rule read = parse
   | '='       { SET }
   | '|'       { BAR }
   | ','       { COMMA }
+  | ';'       { SEMI }
   | "let"     { LET }
   | "rec"     { REC }
   | "and"     { AND }

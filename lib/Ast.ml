@@ -11,6 +11,7 @@ and datadef =
   string * (bool option * string) list * (string * texpr list) list
 
 and expr =
+  | ESeq of expr NonEmpty.t
   | EVar of string
   | ETup of expr list
   | ERef of expr

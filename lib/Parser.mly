@@ -2,7 +2,7 @@
 open Ast
 %}
 
-%token LPAREN RPAREN COMMA
+%token LPAREN RPAREN COMMA SEMI
 %token LSQUARE RSQUARE CONS
 %token LCURLY RCURLY
 %token SLASH ARROW
@@ -84,6 +84,7 @@ expr:
   | LET b = binders IN e = expr { ELet (b, e) }
   | REC b = binders IN e = expr { ERec (b, e) }
   | CASE e = expr OF k = cases { ECase (e, k) }
+  | e = expr_cons COLON t = texpr { ETyped (e, t) }
   | l = expr_cons ST r = expr { EAssign (l, r) }
   | e = expr_cons { e }
 
@@ -109,6 +110,7 @@ case:
   | p = pattern ARROW e = expr { (p, e) }
 
 pattern:
+  | e = pattern_cons COLON t = texpr { PTyped (e, t) }
   | e = pattern_cons { e }
 
 pattern_cons:
@@ -124,7 +126,6 @@ pattern_app:
 
 pattern_atom:
   | LPAREN e = pattern RPAREN { e }
-  | LPAREN e = pattern COLON t = texpr RPAREN { PTyped (e, t) }
   | LCURLY e = patterns RCURLY { PTup e }
   | LSQUARE e = patterns RSQUARE {
     let tl = PDecons ("[]", ref Type.datadef_Void, []) in
@@ -148,8 +149,7 @@ expr_app:
   | e = expr_atom { e }
 
 expr_atom:
-  | LPAREN e = expr COLON t = texpr RPAREN { ETyped (e, t) }
-  | LPAREN e = expr RPAREN { e }
+  | LPAREN e = exprs_semi RPAREN { ESeq e }
   | LCURLY e = exprs RCURLY { ETup e }
   | LSQUARE e = exprs RSQUARE {
     let tl = ECons ("[]", ref Type.datadef_Void, []) in
@@ -164,3 +164,8 @@ exprs:
   | x = expr; COMMA; xs = exprs { x :: xs }
   | x = expr { [x] }
   | { [] }
+
+exprs_semi:
+  | x = expr SEMI xs = exprs_semi { NonEmpty.cons x xs }
+  | x = expr SEMI { NonEmpty.singleton x }
+  | x = expr { NonEmpty.singleton x }
