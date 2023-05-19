@@ -32,18 +32,18 @@ names:
   | x = LNAME { [x] }
 
 root:
-  | DATA; b = datadefs; xs = root { RData b :: xs }
-  | LET; b = binders; xs = root { RLet b :: xs }
-  | REC; b = binders; xs = root { RRec b :: xs }
-  | LET; IGNORE; SET; e = expr; xs = root { RExpr e :: xs }
+  | DATA b = datadefs xs = root { RData b :: xs }
+  | LET b = binders xs = root { RLet b :: xs }
+  | REC b = binders xs = root { RRec b :: xs }
+  | LET IGNORE SET e = expr xs = root { RExpr e :: xs }
   | EOF { [] }
 
 datadefs:
-  | x = datadef; AND; xs = datadefs { x :: xs }
+  | x = datadef AND xs = datadefs { x :: xs }
   | x = datadef { [x] }
 
 datadef:
-  | n = UNAME; a = datapoly*; SET; BAR?; xs = data_entries { (n, a, xs) }
+  | n = UNAME a = datapoly* SET BAR? xs = data_entries { (n, a, xs) }
 
 datapoly:
   | ADD a = LNAME { (Some true, a) }
@@ -51,14 +51,14 @@ datapoly:
   | a = LNAME { (None, a) }
 
 data_entries:
-  | x = data_entry; BAR; xs = data_entries { x :: xs }
+  | x = data_entry BAR xs = data_entries { x :: xs }
   | x = data_entry { [x] }
 
 data_entry:
-  | n = UNAME; a = texpr_atom* { (n, a) }
+  | n = UNAME a = texpr_atom* { (n, a) }
 
 texpr:
-  | a = texpr_app; ARROW; r = texpr { TEArr (a, r) }
+  | a = texpr_app ARROW r = texpr { TEArr (a, r) }
   | e = texpr_app { e }
 
 texpr_app:
@@ -67,14 +67,14 @@ texpr_app:
   | e = texpr_atom { e }
 
 texpr_atom:
-  | LPAREN; e = texpr; RPAREN { e }
-  | LCURLY; e = texprs; RCURLY { TETup e }
-  | LSQUARE; e = texpr; RSQUARE { TECons ("[]", [e]) }
+  | LPAREN e = texpr RPAREN { e }
+  | LCURLY e = texprs RCURLY { TETup e }
+  | LSQUARE e = texpr RSQUARE { TECons ("[]", [e]) }
   | n = LNAME { TEVar n }
   | n = UNAME { TECons (n, []) }
 
 texprs:
-  | x = texpr; COMMA; xs = texprs { x :: xs }
+  | x = texpr COMMA xs = texprs { x :: xs }
   | x = texpr { [x] }
   | { [] }
 
@@ -89,13 +89,13 @@ expr:
   | e = expr_cons { e }
 
 expr_cons:
-  | hd = expr_app; CONS; tl = expr_cons {
+  | hd = expr_app CONS tl = expr_cons {
     ECons ("::", ref Type.datadef_Void, [hd; tl])
   }
   | e = expr_app { e }
 
 binders:
-  | x = binder; AND; xs = binders { x :: xs }
+  | x = binder AND xs = binders { x :: xs }
   | x = binder { [x] }
 
 binder:
@@ -103,7 +103,7 @@ binder:
   | n = LNAME COLON t = texpr { BAnnot (n, t) }
 
 cases:
-  | x = case; SEMI; xs = cases { x :: xs }
+  | x = case SEMI xs = cases { x :: xs }
   | x = case { [x] }
 
 case:
@@ -114,14 +114,14 @@ pattern:
   | e = pattern_cons { e }
 
 pattern_cons:
-  | hd = pattern_app; CONS; tl = pattern {
+  | hd = pattern_app CONS tl = pattern {
     PDecons ("::", ref Type.datadef_Void, [hd; tl])
   }
   | p = pattern_app { p }
 
 pattern_app:
   | REF a = pattern_atom { PDeref a }
-  | k = UNAME; a = pattern_atom+ { PDecons (k, ref Type.datadef_Void, a) }
+  | k = UNAME a = pattern_atom+ { PDecons (k, ref Type.datadef_Void, a) }
   | e = pattern_atom { e }
 
 pattern_atom:
@@ -135,17 +135,17 @@ pattern_atom:
   | IGNORE { PIgn }
   | n = UNAME { PDecons (n, ref Type.datadef_Void, []) }
   | n = LNAME { PVar (n, PIgn) }
-  | n = LNAME; BIND; p = pattern_atom { PVar (n, p) }
+  | n = LNAME BIND p = pattern_atom { PVar (n, p) }
 
 patterns:
-  | x = pattern; COMMA; xs = patterns { x :: xs }
+  | x = pattern COMMA xs = patterns { x :: xs }
   | x = pattern { [x] }
   | { [] }
 
 expr_app:
   | REF a = expr_atom { ERef a }
-  | k = UNAME; a = expr_atom+ { ECons (k, ref Type.datadef_Void, a) }
-  | f = expr_atom; a = expr_atom+ { EApp (f, a) }
+  | k = UNAME a = expr_atom+ { ECons (k, ref Type.datadef_Void, a) }
+  | f = expr_atom a = expr_atom+ { EApp (f, a) }
   | e = expr_atom { e }
 
 expr_atom:
@@ -161,7 +161,7 @@ expr_atom:
   | e = expr_atom LD { EDeref e }
 
 exprs:
-  | x = expr; COMMA; xs = exprs { x :: xs }
+  | x = expr COMMA xs = exprs { x :: xs }
   | x = expr { [x] }
   | { [] }
 
