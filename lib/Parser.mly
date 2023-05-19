@@ -10,7 +10,7 @@ open Ast
 %token REF ST LD
 %token ADD SUB
 %token LET REC SET IN AND
-%token CASE OF IGNORE BIND
+%token CASE IGNORE BIND
 %token COLON
 %token EXPORT
 %token <string> LNAME UNAME
@@ -80,10 +80,10 @@ texprs:
 
 expr:
   | SLASH p = pattern+ ARROW e = expr { ELam (p, e) }
-  | SLASH CASE k = cases { ELamCase k }
+  | SLASH CASE LCURLY k = cases RCURLY { ELamCase k }
   | LET b = binders IN e = expr { ELet (b, e) }
   | REC b = binders IN e = expr { ERec (b, e) }
-  | CASE e = expr OF k = cases { ECase (e, k) }
+  | e = expr_cons CASE LCURLY k = cases RCURLY { ECase (e, k) }
   | e = expr_cons COLON t = texpr { ETyped (e, t) }
   | l = expr_cons ST r = expr { EAssign (l, r) }
   | e = expr_cons { e }
@@ -103,7 +103,7 @@ binder:
   | n = LNAME COLON t = texpr { BAnnot (n, t) }
 
 cases:
-  | x = case; COMMA; xs = cases { x :: xs }
+  | x = case; SEMI; xs = cases { x :: xs }
   | x = case { [x] }
 
 case:

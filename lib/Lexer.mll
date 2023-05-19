@@ -37,7 +37,6 @@ rule read = parse
   | "and"     { AND }
   | "in"      { IN }
   | "case"    { CASE }
-  | "of"      { OF }
   | "data"    { DATA }
   | "export"  { EXPORT }
   | "ref"     { REF }
