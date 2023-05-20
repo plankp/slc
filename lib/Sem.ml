@@ -380,7 +380,7 @@ let check_data_def s b =
     let s = { s with tenv = M.union (fun _ _ v -> Some v) s.tenv env } in
     List.iteri (fun i (k, args) ->
       if Hashtbl.mem m k then
-        failwith "Illegal duplicate constrructor in same data definition";
+        failwith "Illegal duplicate constructor in same data definition";
       Hashtbl.add m k (i, List.map (fun t ->
         match check_texpr false s t with
           | Error e -> failwith e
