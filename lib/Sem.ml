@@ -379,9 +379,9 @@ and check_binders recur s g =
 let check_data_def s b =
   let m = Hashtbl.create 16 in
   let ctors = List.map (fun (n, targs, _) ->
-    let (_, targs, env) = List.fold_left (fun (v, xs, m) (vannot, a) ->
+    let (id, targs, env) = List.fold_left (fun (v, xs, m) (vannot, a) ->
       let m = M.update a (function
-        | None -> Some (Value (Type.TyPly (v, Z.zero)))
+        | None -> Some (Value (Type.TyPly (v, Type.null_level)))
         | _ -> failwith "Illegal duplicate type argument in same data definition") m in
       let variance = match vannot with
         | None -> Type.Invariant
@@ -393,7 +393,7 @@ let check_data_def s b =
     let self = (n, List.rev targs, mapping) in
     if Hashtbl.mem m n then
       failwith "Illegal duplicate data name in same block";
-    Hashtbl.add m n (mapping, env);
+    Hashtbl.add m n (mapping, env, id);
     self) b in
 
   let s = List.fold_left (fun s self ->
@@ -401,12 +401,20 @@ let check_data_def s b =
     { s with tenv = M.add n (Ctor self) s.tenv }) s ctors in
 
   List.iter (fun (n, _, cases) ->
-    let (m, env) = Hashtbl.find m n in
+    let (m, env, id) = Hashtbl.find m n in
     let s = { s with tenv = M.union (fun _ _ v -> Some v) s.tenv env } in
-    List.iteri (fun i (k, args) ->
+    List.iteri (fun i (k, extn, args) ->
       if Hashtbl.mem m k then
         failwith "Illegal duplicate constructor in same data definition";
-      Hashtbl.add m k (i, [], List.map (fun t ->
+      let check_dups = Hashtbl.create 8 in
+      let (_, acc, s) = List.fold_left (fun (id, acc, s) extn ->
+        if Hashtbl.mem check_dups extn then
+          failwith ("Illegal duplicate existential type " ^ extn);
+        Hashtbl.add check_dups extn ();
+        let dummy = Type.TyPly (id, Type.null_level) in
+        let s = { s with tenv = M.add extn (Value dummy) s.tenv } in
+        (Z.succ id, id :: acc, s)) (id, [], s) extn in
+      Hashtbl.add m k (i, acc, List.map (fun t ->
         match check_texpr false s t with
           | Error e -> failwith e
           | Ok (_, t) -> t) args)) cases) b;
