@@ -10,12 +10,12 @@ type ('a, 'b) ventry =
   | Value of 'b
 
 type styp_t = (Type.datadef, Type.t) ventry M.t
-type sval_t = (Type.datadef * Type.t list, Type.t) ventry M.t
+type sval_t = (Type.datadef * Z.t list * Type.t list, Type.t) ventry M.t
 
 let register_ctors (d : Type.datadef) s =
   let (_, _, q) = d in
-  Hashtbl.fold (fun k (_, args) s ->
-    M.add k (Ctor (d, args)) s) q s
+  Hashtbl.fold (fun k (_, extn, args) s ->
+    M.add k (Ctor (d, extn, args)) s) q s
 
 let group_binders b =
   let mval = Hashtbl.create 16 in
@@ -104,19 +104,19 @@ let lookup_data_ctor t s k =
     | TyDat ((_, polys, m) as d, targs) -> begin
       match Hashtbl.find_opt m k with
         | None -> Error ("Unrecognized data constructor " ^ k)
-        | Some (_, params) ->
+        | Some (_, extn, params) ->
           let penv = List.fold_left2 (fun penv (p, _) t ->
             Type.IdMap.add p t penv) Type.IdMap.empty polys targs in
-          Ok (d, params, penv)
+          Ok (d, extn, params, penv)
     end
     | _ ->
       match M.find_opt k s.venv with
-        | Some (Ctor ((_, polys, _) as d, params)) ->
+        | Some (Ctor ((_, polys, _) as d, extn, params)) ->
           let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
             let t = Type.new_tyvar s.level in
             (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
           Type.unify t (Type.TyDat (d, targs));
-          Ok (d, params, penv)
+          Ok (d, extn, params, penv)
         | _ -> Error ("Unrecognized data constructor " ^ k)
 
 let rec check_pat t binds s = function
@@ -155,16 +155,33 @@ let rec check_pat t binds s = function
     fill_tyvars [] xs
 
   | Ast.PDecons (k, dinfo, args) ->
-    let< (d, params, penv) = lookup_data_ctor t s k in
+    let< (d, extn, params, penv) = lookup_data_ctor t s k in
+
+    (* unlike constructing data terms, which map existentials to fresh
+     * unification type variables, we map them to fresh rigid type variables.
+     *
+     * we do this because:
+     * -  the type is opaque (can be anything)
+     * -  the type must not escape *)
+    let penv = List.fold_left (fun penv p ->
+      let t = Type.new_rigidvar s.level in
+      Type.IdMap.add p t penv) penv extn in
+
+    (* which brings us to the issue that since we may bound existentials,
+     * all subpatterns must be one level deeper. (has to do with scoped type
+     * variables) *)
+
     let rec loop binds s = function
       | [], [] ->
         dinfo := d;
+        let s = { s with level = Type.decr_level s.level } in
         Ok (binds, s)
       | param :: xs, arg :: ys ->
         let param = Type.subst penv param in
         let< (binds, s) = check_pat param binds s arg in
         loop binds s (xs, ys)
       | _ -> Error "Data constructor argument length mismatch" in
+    let s = { s with level = Type.incr_level s.level } in
     loop binds s (params, args)
 
 let rec is_value = function
@@ -192,10 +209,16 @@ let rec check_expr s = function
 
   | Ast.ECons (k, dinfo, args) -> begin
     match M.find_opt k s.venv with
-      | Some (Ctor ((_, polys, _) as d, params)) ->
+      | Some (Ctor ((_, polys, _) as d, extn, params)) ->
         let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
           let t = Type.new_tyvar s.level in
           (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
+
+        (* when constructing, replace existentials with fresh unification type
+         * variables *)
+        let penv = List.fold_left (fun penv p ->
+          let t = Type.new_tyvar s.level in
+          Type.IdMap.add p t penv) penv extn in
 
         let rec loop = function
           | [], [] ->
@@ -287,6 +310,7 @@ and check_case valty s xs =
     | [] -> Ok resty
     | (p, e) :: xs ->
       let< (_, s) = check_pat valty S.empty s p in
+      let s = { s with level = Type.incr_level s.level } in
       let< r = check_expr s e in
       Type.unify r resty;
       loop xs in
@@ -299,6 +323,7 @@ and check_binder_rhs s cases =
     | (ps, e) :: xs ->
       let rec collect_cols binds s args = function
         | [] ->
+          let s = { s with level = Type.incr_level s.level } in
           let< r = check_expr s e in
           let r = List.fold_left (fun r a -> Type.TyArr (a, r)) r args in
           Type.unify rowty r;
@@ -381,7 +406,7 @@ let check_data_def s b =
     List.iteri (fun i (k, args) ->
       if Hashtbl.mem m k then
         failwith "Illegal duplicate constructor in same data definition";
-      Hashtbl.add m k (i, List.map (fun t ->
+      Hashtbl.add m k (i, [], List.map (fun t ->
         match check_texpr false s t with
           | Error e -> failwith e
           | Ok (_, t) -> t) args)) cases) b;
@@ -483,7 +508,7 @@ let rec lower_funk e id s h k =
         | [] ->
           let name, id = id, id + 1 in
           let id, tail = k id name in
-          let (slot, _) = Hashtbl.find mapping ctor in
+          let (slot, _, _) = Hashtbl.find mapping ctor in
           (id, LetCons (name, slot, List.rev acc, ref tail)) in
       loop id [] args
 
@@ -704,7 +729,7 @@ and lower_case v id cases h k =
             match ps with
               | Ast.PIgn :: ps ->
                 Hashtbl.fold (fun ctor fill m ->
-                  let (slot, _) = Hashtbl.find max_ctors ctor in
+                  let (slot, _, _) = Hashtbl.find max_ctors ctor in
                   let args = Lazy.force fill in
                   let row = ps
                     |> List.rev_append args
@@ -713,7 +738,7 @@ and lower_case v id cases h k =
                     | None -> Some (args, [row])
                     | Some (p, xs) -> Some (p, row :: xs)) m) partitions m
               | Ast.PDecons (ctor, _, args) :: ps ->
-                let (slot, _) = Hashtbl.find max_ctors ctor in
+                let (slot, _, _) = Hashtbl.find max_ctors ctor in
                 let row = List.rev_append pinit (args @ ps), s, e in
                 Hir.M.update (Some slot) (function
                   | None -> Some (args, [row])

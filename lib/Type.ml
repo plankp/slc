@@ -3,6 +3,7 @@ module IdMap = Map.Make (Z)
 type t =
   | TyVar of tyvar ref
   | TyPly of tname
+  | TyRigid of tname
   | TyArr of t * t
   | TyTup of t list
   | TyDat of datadef * t list
@@ -19,35 +20,50 @@ and level =
   Z.t
 
 and datadef =
-  string * (Z.t * variance) list * (string, int * t list) Hashtbl.t
+  (* data T a1 a2... = forall e1... K1 p1 p2... | ...
+   *
+   * a1 a2... e1... are TyPly's with null_level (0)
+   * e1... are specifically existentials
+   * p1 p2... may have other TyPly which are treated as existentials
+   *
+   * in the end of the day, there should be no free poly types floating:
+   * (FPV(p1) U FPV(p1)...) \ e1... \ a1... = \emptyset *)
+  string * (Z.t * variance) list * (string, int * Z.t list * t list) Hashtbl.t
 
 and variance =
   | Covariant
   | Contravariant
   | Invariant
 
+(* data Void = .  <-- impossible type in surface syntax *)
 let datadef_Void : datadef =
   ("Void", [], Hashtbl.create 0)
 
+(* data List +a = [] | (::) a (List a)  <-- corresponds to [a] *)
 let datadef_List : datadef =
   let m = Hashtbl.create 2 in
   let self = ("List", [Z.zero, Covariant], m) in
   let t0 = TyPly (Z.zero, Z.zero) in
-  Hashtbl.add m "[]" (0, []);
-  Hashtbl.add m "::" (1, [t0; (TyDat (self, [t0]))]);
+  Hashtbl.add m "[]" (0, [], []);
+  Hashtbl.add m "::" (1, [], [t0; (TyDat (self, [t0]))]);
   self
 
 let null_level : level = Z.zero
 let incr_level : level -> level = Z.succ
 let decr_level : level -> level = Z.pred
 
-let new_tyvar : level -> t =
-  let fresh_id = ref Z.zero in
-  fun level ->
-    let id = !fresh_id in
-    let t = TyVar (ref (Unbound (id, level))) in
-    fresh_id := Z.succ id;
-    t
+let fresh_id : unit -> Z.t =
+  let counter = ref Z.zero in
+  fun () ->
+    let id = !counter in
+    counter := Z.succ id;
+    id
+
+let new_tyvar (l : level) : t =
+  TyVar (ref (Unbound (fresh_id (), l)))
+
+let new_rigidvar (l : level) : t =
+  TyRigid (fresh_id (), l)
 
 let rec unwrap_shallow : t -> t = function
   | TyVar ({ contents = Link t } as r) ->
@@ -59,7 +75,7 @@ let rec unwrap_shallow : t -> t = function
 let rec has_free_tv : t -> bool = function
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> has_free_tv
   | TyVar _ -> true
-  | TyPly _ -> false
+  | TyPly _ | TyRigid _ -> false
   | TyRef t -> has_free_tv t
   | TyArr (a, r) -> if has_free_tv a then true else has_free_tv r
   | TyTup xs | TyDat (_, xs) -> List.exists has_free_tv xs
@@ -68,7 +84,7 @@ let inst (level : level) (t : t) : t =
   let map = Hashtbl.create 16 in
   let rec walk = function
     | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> walk
-    | TyVar _ as t -> t
+    | TyVar _ | TyRigid _ as t -> t
     | TyRef t -> TyRef (walk t)
     | TyArr (a, r) -> TyArr (walk a, walk r)
     | TyTup xs -> TyTup (List.map walk xs)
@@ -85,7 +101,7 @@ let inst (level : level) (t : t) : t =
 let rec subst (m : t IdMap.t) : t -> t = function
   | t when IdMap.is_empty m -> t
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> subst m
-  | TyVar _ as t -> t
+  | TyVar _ | TyRigid _ as t -> t
   | TyRef t -> TyRef (subst m t)
   | TyArr (a, r) -> TyArr (subst m a, subst m r)
   | TyTup xs -> TyTup (List.map (subst m) xs)
@@ -95,6 +111,7 @@ let rec subst (m : t IdMap.t) : t -> t = function
 let rec gen (level : level) : t -> t = function
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> gen level
   | TyPly _ -> failwith "Invalid existing polytype when generalizing"
+  | TyRigid _ as t -> t
   | TyRef t -> TyRef (gen level t)
   | TyArr (a, r) -> TyArr (gen level a, gen level r)
   | TyTup xs -> TyTup (List.map (gen level) xs)
@@ -127,8 +144,7 @@ let check_datadef_variance ((_, targs, cases) : datadef) : unit =
         | Some _, Covariant ->
           failwith "Usage requires covariant"
     end
-    | TyVar _ -> ()
-    | TyPly _ -> ()
+    | TyVar _ | TyPly _ | TyRigid _ -> ()
     | TyRef t -> walk Invariant t
     | TyArr (a, r) ->
       walk (enter_variance ctx Contravariant) a;
@@ -140,7 +156,7 @@ let check_datadef_variance ((_, targs, cases) : datadef) : unit =
         walk (enter_variance ctx v)) params xs in
 
   List.iter (fun (n, v) -> Hashtbl.add m n v) targs;
-  Hashtbl.iter (fun _ (_, sites) ->
+  Hashtbl.iter (fun _ (_, _, sites) ->
     List.iter (walk Covariant) sites) cases
 
 let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = function
@@ -149,7 +165,7 @@ let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = func
   | TyVar ({ contents = Unbound (n, l1) } as r) ->
     if dangerous && Z.compare l2 l1 < 0 then
       r := Unbound (n, l2)
-  | TyPly _ -> ()
+  | TyPly _ | TyRigid _ -> ()
   | TyRef t ->
     drop_dangerous_level' l2 true t
   | TyArr (p, q) ->
@@ -173,7 +189,7 @@ let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
       failwith "Illegal infinite type construction";
     (* keep the lower level *)
     r := Unbound (n, Z.min l1 l2)
-  | TyPly (_, l1) ->
+  | TyPly (_, l1) | TyRigid (_, l1) ->
     if Z.compare l1 l2 >= 0 then
       failwith "Unification cause rigid type variable to escape its scope"
   | TyRef t ->
@@ -207,7 +223,8 @@ let rec unify_loop : (t * t) list -> unit = function
         r := Link t;
         unify_loop xs
 
-      | TyPly a, TyPly b when a = b ->
+      | TyPly a, TyPly b
+      | TyRigid a, TyRigid b when a = b ->
         unify_loop xs
 
       | TyRef a, TyRef b ->
@@ -270,6 +287,8 @@ let bprint (buf : Buffer.t) (t : t) : unit =
           next_id := Z.succ id;
           name in
       Printf.bprintf buf "%s" n
+    | TyRigid (id, _) ->
+      Printf.bprintf buf "?%a" Z.bprint id
     | TyTup [] ->
       Printf.bprintf buf "{}"
     | TyTup (x :: xs) ->
