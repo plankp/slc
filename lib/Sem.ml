@@ -9,13 +9,14 @@ type ('a, 'b) ventry =
   | Ctor of 'a
   | Value of 'b
 
+type typescheme_t = Type.RSet.t * Type.t
+type ctorinfo_t = Type.datadef * Type.tname list * Type.t list
 type styp_t = (Type.datadef, Type.t) ventry M.t
-type sval_t = (Type.datadef * Z.t list * Type.t list, Type.t) ventry M.t
+type sval_t = (ctorinfo_t, typescheme_t) ventry M.t
 
 let register_ctors (d : Type.datadef) s =
-  let (_, _, q) = d in
   Hashtbl.fold (fun k (_, extn, args) s ->
-    M.add k (Ctor (d, extn, args)) s) q s
+    M.add k (Ctor (d, extn, args)) s) d.cases s
 
 let group_binders b =
   let mval = Hashtbl.create 16 in
@@ -88,33 +89,33 @@ let rec check_texpr allow_fresh s = function
 
   | Ast.TECons (k, args) ->
     match M.find_opt k s.tenv with
-      | Some (Ctor ((_, params, _) as info)) ->
+      | Some (Ctor info) ->
         let rec loop s acc = function
           | [], [] -> Ok (s, Type.TyDat (info, List.rev acc))
           | x :: xs, _ :: ys ->
             let< (s, x) = check_texpr allow_fresh s x in
             loop s (x :: acc) (xs, ys)
           | _ -> Error "Type constructor argument length mismatch" in
-        loop s [] (args, params)
+        loop s [] (args, info.args)
 
       | _ -> Error ("Type constructor " ^ k ^ " not found")
 
 let lookup_data_ctor t s k =
   match Type.unwrap_shallow t with
-    | TyDat ((_, polys, m) as d, targs) -> begin
-      match Hashtbl.find_opt m k with
+    | TyDat (d, targs) -> begin
+      match Hashtbl.find_opt d.cases k with
         | None -> Error ("Unrecognized data constructor " ^ k)
         | Some (_, extn, params) ->
           let penv = List.fold_left2 (fun penv (p, _) t ->
-            Type.IdMap.add p t penv) Type.IdMap.empty polys targs in
+            Type.RMap.add p t penv) Type.RMap.empty d.args targs in
           Ok (d, extn, params, penv)
     end
     | _ ->
       match M.find_opt k s.venv with
-        | Some (Ctor ((_, polys, _) as d, extn, params)) ->
+        | Some (Ctor (d, extn, params)) ->
           let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
             let t = Type.new_tyvar s.level in
-            (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
+            (t :: xs, Type.RMap.add p t penv)) d.args ([], Type.RMap.empty) in
           Type.unify t (Type.TyDat (d, targs));
           Ok (d, extn, params, penv)
         | _ -> Error ("Unrecognized data constructor " ^ k)
@@ -126,7 +127,7 @@ let rec check_pat t binds s = function
     if S.mem n binds then
       Error ("Binding " ^ n ^ " is not linearly bound")
     else
-      let s = { s with venv = M.add n (Value t) s.venv } in
+      let s = { s with venv = M.add n (Value (Type.RSet.empty, t)) s.venv } in
       check_pat t (S.add n binds) s p
 
   | Ast.PTyped (p, t') ->
@@ -164,8 +165,8 @@ let rec check_pat t binds s = function
      * -  the type is opaque (can be anything)
      * -  the type must not escape *)
     let penv = List.fold_left (fun penv p ->
-      let t = Type.new_rigidvar s.level in
-      Type.IdMap.add p t penv) penv extn in
+      let t = Type.new_poly s.level in
+      Type.RMap.add p t penv) penv extn in
 
     (* which brings us to the issue that since we may bound existentials,
      * all subpatterns must be one level deeper. (has to do with scoped type
@@ -203,22 +204,22 @@ let is_value_binder_rhs = function
 let rec check_expr s = function
   | Ast.EVar n -> begin
     match M.find_opt n s.venv with
-      | Some (Value t) -> Ok (Type.inst s.level t)
+      | Some (Value (foralls, t)) -> Ok (Type.inst foralls s.level t)
       | _ -> Error ("Name " ^ n ^ " not found")
   end
 
   | Ast.ECons (k, dinfo, args) -> begin
     match M.find_opt k s.venv with
-      | Some (Ctor ((_, polys, _) as d, extn, params)) ->
+      | Some (Ctor (d, extn, params)) ->
         let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
           let t = Type.new_tyvar s.level in
-          (t :: xs, Type.IdMap.add p t penv)) polys ([], Type.IdMap.empty) in
+          (t :: xs, Type.RMap.add p t penv)) d.args ([], Type.RMap.empty) in
 
         (* when constructing, replace existentials with fresh unification type
          * variables *)
         let penv = List.fold_left (fun penv p ->
           let t = Type.new_tyvar s.level in
-          Type.IdMap.add p t penv) penv extn in
+          Type.RMap.add p t penv) penv extn in
 
         let rec loop = function
           | [], [] ->
@@ -342,9 +343,11 @@ and check_binders recur s g =
   let rec gen_binders s = function
     | [] -> Ok s
     | (n, t) :: xs ->
-      let (try_gen, t') = Hashtbl.find m n in
+      let (foralls, t') = Hashtbl.find m n in
       Type.unify t t';
-      let t = if try_gen then Type.gen s.level t else t in
+      let t = match foralls with
+        | None -> Type.gen s.level t
+        | Some s -> (s, t) in
       gen_binders { s with venv = M.add n (Value t) s.venv } xs in
 
   let rec eval_binders acc rhs_s = function
@@ -363,61 +366,65 @@ and check_binders recur s g =
       eval_binders [] rhs_env g
     | (n, None, _) :: xs ->
       let t = s.level |> Type.incr_level |> Type.new_tyvar in
-      fill_annots_tail s' n t true xs
+      fill_annots_tail s' n (None, t) xs
     | (n, Some typ, _) :: xs ->
       let s = { s with level = Type.incr_level s.level } in
       let< (_, t) = check_texpr true s typ in
       let s = { s with level = Type.decr_level s.level } in
-      let t = Type.gen s.level t in
-      fill_annots_tail s' n t false xs
-  and fill_annots_tail s n t try_gen xs =
-    Hashtbl.add m n (try_gen, t);
-    fill_annots { s with venv = M.add n (Value t) s.venv } xs in
+      let (foralls, t) = Type.gen s.level t in
+      fill_annots_tail s' n (Some foralls, t) xs
+  and fill_annots_tail s n (foralls, t) xs =
+    Hashtbl.add m n (foralls, t);
+    let foralls = Option.value ~default:Type.RSet.empty foralls in
+    fill_annots { s with venv = M.add n (Value (foralls, t)) s.venv } xs in
 
   fill_annots s g
 
 let check_data_def s b =
   let m = Hashtbl.create 16 in
-  let ctors = List.map (fun (n, targs, _) ->
-    let (id, targs, env) = List.fold_left (fun (v, xs, m) (vannot, a) ->
+  let ctors = List.map (fun (name, targs, _) ->
+    let (_, targs, env) = List.fold_left (fun (v, xs, m) (vannot, a) ->
+      let info = (v, Type.null_level) in
       let m = M.update a (function
-        | None -> Some (Value (Type.TyPly (v, Type.null_level)))
+        | None -> Some (Value (Type.TyPly info))
         | _ -> failwith "Illegal duplicate type argument in same data definition") m in
       let variance = match vannot with
         | None -> Type.Invariant
         | Some true -> Type.Covariant
         | Some false -> Type.Contravariant in
-      (Z.succ v, (v, variance) :: xs, m)) (Z.zero, [], M.empty) targs in
+      (Z.succ v, (info, variance) :: xs, m)) (Z.zero, [], M.empty) targs in
 
-    let mapping = Hashtbl.create 16 in
-    let self = (n, List.rev targs, mapping) in
-    if Hashtbl.mem m n then
+    let cases = Hashtbl.create 16 in
+    let self : Type.datadef = { name; cases; args = List.rev targs } in
+    if Hashtbl.mem m name then
       failwith "Illegal duplicate data name in same block";
-    Hashtbl.add m n (mapping, env, id);
+    Hashtbl.add m name (cases, env);
     self) b in
 
   let s = List.fold_left (fun s self ->
-    let (n, _, _) = self in
-    { s with tenv = M.add n (Ctor self) s.tenv }) s ctors in
+    { s with tenv = M.add self.Type.name (Ctor self) s.tenv }) s ctors in
 
   List.iter (fun (n, _, cases) ->
-    let (m, env, id) = Hashtbl.find m n in
+    let (m, env) = Hashtbl.find m n in
     let s = { s with tenv = M.union (fun _ _ v -> Some v) s.tenv env } in
-    List.iteri (fun i (k, extn, args) ->
+    List.iteri (fun i (k, args) ->
       if Hashtbl.mem m k then
         failwith "Illegal duplicate constructor in same data definition";
-      let check_dups = Hashtbl.create 8 in
-      let (_, acc, s) = List.fold_left (fun (id, acc, s) extn ->
-        if Hashtbl.mem check_dups extn then
-          failwith ("Illegal duplicate existential type " ^ extn);
-        Hashtbl.add check_dups extn ();
-        let dummy = Type.TyPly (id, Type.null_level) in
-        let s = { s with tenv = M.add extn (Value dummy) s.tenv } in
-        (Z.succ id, id :: acc, s)) (id, [], s) extn in
-      Hashtbl.add m k (i, acc, List.map (fun t ->
-        match check_texpr false s t with
-          | Error e -> failwith e
-          | Ok (_, t) -> t) args)) cases) b;
+      let rec loop acc s = function
+        | [] ->
+          let s = { s with level = Type.decr_level s.level } in
+          Ok (s, acc)
+        | x :: xs ->
+          let< (s, t) = check_texpr true s x in
+          loop (t :: acc) s xs in
+      let s = { s with level = Type.incr_level s.level } in
+      match loop [] s args with
+        | Error e -> failwith e
+        | Ok (s, args) ->
+          match Type.gen s.level (Type.TyTup (List.rev args)) with
+            | (existentials, Type.TyTup args) ->
+              Hashtbl.add m k (i, Type.RSet.elements existentials, args)
+            | _ -> assert false) cases) b;
 
   List.iter Type.check_datadef_variance ctors;
 
@@ -430,9 +437,9 @@ let check (exports, m) =
         | [] -> Ok m
         | x :: xs ->
           match M.find_opt x s.venv with
-            | Some (Value t) when Type.has_free_tv t ->
+            | Some (Value (_, t)) when Type.has_free_tv t ->
               Error "Cannot export binder with free type variable"
-            | Some (Value t) -> loop (M.add x t m) xs
+            | Some (Value (_, t)) -> loop (M.add x t m) xs
             | _ -> Error ("Cannot export inexistent binder " ^ x) in
       loop M.empty exports
     | Ast.RExpr e :: xs ->
@@ -448,9 +455,8 @@ let check (exports, m) =
       try
         let ctors = check_data_def s b in
         let s = List.fold_left (fun s ctor ->
-          let (n, _, _) = ctor in
           { s with venv = register_ctors ctor s.venv
-                 ; tenv = M.add n (Ctor ctor) s.tenv }) s ctors in
+                 ; tenv = M.add ctor.name (Ctor ctor) s.tenv }) s ctors in
         check_module s xs
       with Failure e -> Error e
     end in
@@ -509,14 +515,14 @@ let rec lower_funk e id s h k =
           (id, LetPack (name, List.rev acc, ref tail)) in
       loop id [] xs
 
-    | Ast.ECons (ctor, { contents = (_, _, mapping) }, args) ->
+    | Ast.ECons (ctor, { contents = info }, args) ->
       let rec loop id acc = function
         | x :: xs ->
           lower_funk x id s h (fun id x -> loop id (x :: acc) xs)
         | [] ->
           let name, id = id, id + 1 in
           let id, tail = k id name in
-          let (slot, _, _) = Hashtbl.find mapping ctor in
+          let (slot, _, _) = Hashtbl.find info.cases ctor in
           (id, LetCons (name, slot, List.rev acc, ref tail)) in
       loop id [] args
 
@@ -696,7 +702,7 @@ and lower_case v id cases h k =
                 (i + 1, LetProj (start + i, i, scrut, ref term))) (0, term) elts in
               (id, term) in
           spec id [] [] [] elts
-        | v :: vs, Ast.PDecons (_, { contents = (_, _, max_ctors) }, _) :: _ ->
+        | v :: vs, Ast.PDecons (_, { contents = info }, _) :: _ ->
           (* assume the variant type has data constructors k1 to kN, then
            * what we in essence is specialize the case over every possible
            * constructor.
@@ -723,7 +729,7 @@ and lower_case v id cases h k =
             coiter [] s (vinit, p)) rows in
 
           let m =
-            if Hashtbl.length partitions = Hashtbl.length max_ctors then
+            if Hashtbl.length partitions = Hashtbl.length info.cases then
               Hir.M.empty
             else begin
               (* need to emit the default case *)
@@ -737,7 +743,7 @@ and lower_case v id cases h k =
             match ps with
               | Ast.PIgn :: ps ->
                 Hashtbl.fold (fun ctor fill m ->
-                  let (slot, _, _) = Hashtbl.find max_ctors ctor in
+                  let (slot, _, _) = Hashtbl.find info.cases ctor in
                   let args = Lazy.force fill in
                   let row = ps
                     |> List.rev_append args
@@ -746,7 +752,7 @@ and lower_case v id cases h k =
                     | None -> Some (args, [row])
                     | Some (p, xs) -> Some (p, row :: xs)) m) partitions m
               | Ast.PDecons (ctor, _, args) :: ps ->
-                let (slot, _, _) = Hashtbl.find max_ctors ctor in
+                let (slot, _, _) = Hashtbl.find info.cases ctor in
                 let row = List.rev_append pinit (args @ ps), s, e in
                 Hir.M.update (Some slot) (function
                   | None -> Some (args, [row])

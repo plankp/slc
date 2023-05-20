@@ -11,7 +11,7 @@ open Ast
 %token ADD SUB
 %token LET REC SET IN AND
 %token CASE IGNORE BIND
-%token COLON DOT
+%token COLON
 %token EXPORT
 %token <string> LNAME UNAME
 %token EOF
@@ -55,8 +55,7 @@ data_entries:
   | x = data_entry { [x] }
 
 data_entry:
-  | n = UNAME a = texpr_atom* { (n, [], a) }
-  | e = LNAME+ DOT n = UNAME a = texpr_atom* { (n, e, a) }
+  | n = UNAME a = texpr_atom* { (n, a) }
 
 texpr:
   | a = texpr_app ARROW r = texpr { TEArr (a, r) }

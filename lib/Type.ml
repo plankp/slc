@@ -1,9 +1,22 @@
-module IdMap = Map.Make (Z)
+type level = Z.t
+type tname = Z.t * level
+
+module TName = struct
+  type t = tname
+  let compare = compare
+end
+
+module RMap = Map.Make (TName)
+module RSet = Set.Make (TName)
+
+type variance =
+  | Covariant
+  | Contravariant
+  | Invariant
 
 type t =
   | TyVar of tyvar ref
   | TyPly of tname
-  | TyRigid of tname
   | TyArr of t * t
   | TyTup of t list
   | TyDat of datadef * t list
@@ -13,39 +26,27 @@ and tyvar =
   | Unbound of tname
   | Link of t
 
-and tname =
-  Z.t * level
-
-and level =
-  Z.t
-
 and datadef =
-  (* data T a1 a2... = forall e1... K1 p1 p2... | ...
-   *
-   * a1 a2... e1... are TyPly's with null_level (0)
-   * e1... are specifically existentials
-   * p1 p2... may have other TyPly which are treated as existentials
-   *
-   * in the end of the day, there should be no free poly types floating:
-   * (FPV(p1) U FPV(p1)...) \ e1... \ a1... = \emptyset *)
-  string * (Z.t * variance) list * (string, int * Z.t list * t list) Hashtbl.t
-
-and variance =
-  | Covariant
-  | Contravariant
-  | Invariant
+  (* each case holds a tname list for existentials *)
+  { name  : string
+  ; args  : (tname * variance) list
+  ; cases : (string, int * tname list * t list) Hashtbl.t
+  }
 
 (* data Void = .  <-- impossible type in surface syntax *)
 let datadef_Void : datadef =
-  ("Void", [], Hashtbl.create 0)
+  { name = "Void"
+  ; args = []
+  ; cases = Hashtbl.create 0
+  }
 
 (* data List +a = [] | (::) a (List a)  <-- corresponds to [a] *)
 let datadef_List : datadef =
-  let m = Hashtbl.create 2 in
-  let self = ("List", [Z.zero, Covariant], m) in
-  let t0 = TyPly (Z.zero, Z.zero) in
-  Hashtbl.add m "[]" (0, [], []);
-  Hashtbl.add m "::" (1, [], [t0; (TyDat (self, [t0]))]);
+  let cases = Hashtbl.create 2 in
+  let t0 = (Z.zero, Z.zero) in
+  let self = { name = "List"; args = [t0, Covariant]; cases } in
+  Hashtbl.add cases "[]" (0, [], []);
+  Hashtbl.add cases "::" (1, [], [TyPly t0; (TyDat (self, [TyPly t0]))]);
   self
 
 let null_level : level = Z.zero
@@ -62,8 +63,8 @@ let fresh_id : unit -> Z.t =
 let new_tyvar (l : level) : t =
   TyVar (ref (Unbound (fresh_id (), l)))
 
-let new_rigidvar (l : level) : t =
-  TyRigid (fresh_id (), l)
+let new_poly (l : level) : t =
+  TyPly (fresh_id (), l)
 
 let rec unwrap_shallow : t -> t = function
   | TyVar ({ contents = Link t } as r) ->
@@ -75,52 +76,84 @@ let rec unwrap_shallow : t -> t = function
 let rec has_free_tv : t -> bool = function
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> has_free_tv
   | TyVar _ -> true
-  | TyPly _ | TyRigid _ -> false
+  | TyPly _ -> false
   | TyRef t -> has_free_tv t
   | TyArr (a, r) -> if has_free_tv a then true else has_free_tv r
   | TyTup xs | TyDat (_, xs) -> List.exists has_free_tv xs
 
-let inst (level : level) (t : t) : t =
-  let map = Hashtbl.create 16 in
-  let rec walk = function
-    | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> walk
-    | TyVar _ | TyRigid _ as t -> t
-    | TyRef t -> TyRef (walk t)
-    | TyArr (a, r) -> TyArr (walk a, walk r)
-    | TyTup xs -> TyTup (List.map walk xs)
-    | TyDat (k, xs) -> TyDat (k, List.map walk xs)
-    | TyPly k ->
-      match Hashtbl.find_opt map k with
-        | Some v -> v
-        | None ->
-          let v = new_tyvar level in
-          Hashtbl.add map k v;
-          v in
-  walk t
-
-let rec subst (m : t IdMap.t) : t -> t = function
-  | t when IdMap.is_empty m -> t
+let rec subst (m : t RMap.t) : t -> t = function
+  | t when RMap.is_empty m -> t
   | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> subst m
-  | TyVar _ | TyRigid _ as t -> t
+  | TyVar _ as t -> t
   | TyRef t -> TyRef (subst m t)
   | TyArr (a, r) -> TyArr (subst m a, subst m r)
   | TyTup xs -> TyTup (List.map (subst m) xs)
   | TyDat (k, xs) -> TyDat (k, List.map (subst m) xs)
-  | TyPly (id, _) as t -> m |> IdMap.find_opt id |> Option.value ~default:t
+  | TyPly n as t -> m |> RMap.find_opt n |> Option.value ~default:t
 
-let rec gen (level : level) : t -> t = function
-  | TyVar { contents = Link _ } as t -> t |> unwrap_shallow |> gen level
-  | TyPly _ -> failwith "Invalid existing polytype when generalizing"
-  | TyRigid _ as t -> t
-  | TyRef t -> TyRef (gen level t)
-  | TyArr (a, r) -> TyArr (gen level a, gen level r)
-  | TyTup xs -> TyTup (List.map (gen level) xs)
-  | TyDat (k, xs) -> TyDat (k, List.map (gen level) xs)
-  | TyVar { contents = Unbound (n, l) } as t ->
-    if Z.compare l level <= 0 then t
-    else TyPly (n, level)
+let inst (s : RSet.t) (level : level) (t : t) : t =
+  let m = RSet.fold (fun n ->
+    RMap.add n (new_tyvar level)) s RMap.empty in
+  subst m t
 
-let check_datadef_variance ((_, targs, cases) : datadef) : unit =
+let gen (level : level) (t : t) : RSet.t * t =
+  (* alias, we are faced with accidental name shadowing.
+   * here, we do two traversals:
+   * 1.  collect problematic names and checks if generalization happens
+   * 2.  rewrite the term (if generalization is needed) *)
+  let rec collect (f, v) = function
+    | TyVar { contents = Link _ } as t ->
+      t |> unwrap_shallow |> collect (f, v)
+    | TyVar { contents = Unbound (_, l) } ->
+      (f || Z.compare l level > 0, v)
+    | TyPly (n, l) ->
+      (f, if l = level then Z.max n v else v)
+    | TyRef t -> collect (f, v) t
+    | TyArr (a, r) -> collect (collect (f, v) a) r
+    | TyTup xs | TyDat (_, xs) -> List.fold_left collect (f, v) xs in
+
+  let rec rewrite id env s = function
+    | TyVar { contents = Link _ } as t ->
+      t |> unwrap_shallow |> rewrite id env s
+    | TyVar { contents = Unbound ((_, l) as key) } as t ->
+      if Z.compare l level <= 0 then (t, id, env, s)
+      else begin
+        match RMap.find_opt key env with
+          | Some t -> (t, id, env, s)
+          | None ->
+            let id = Z.succ id in
+            let info = (id, level) in
+            let t = TyPly info in
+            (t, id, RMap.add key t env, RSet.add info s)
+      end
+    | TyPly _ as t -> (t, id, env, s)
+    | TyRef t ->
+      let (t, id, env, s) = rewrite id env s t in
+      (TyRef t, id, env, s)
+    | TyArr (a, r) ->
+      let (a, id, env, s) = rewrite id env s a in
+      let (r, id, env, s) = rewrite id env s r in
+      (TyArr (a, r), id, env, s)
+    | TyTup xs ->
+      let (xs, id, env, s) = rewrite_many [] id env s xs in
+      (TyTup xs, id, env, s)
+    | TyDat (k, xs) ->
+      let (xs, id, env, s) = rewrite_many [] id env s xs in
+      (TyDat (k, xs), id, env, s)
+
+  and rewrite_many acc id env s = function
+    | [] -> (List.rev acc, id, env, s)
+    | x :: xs ->
+      let (x, id, env, s) = rewrite id env s x in
+      rewrite_many (x :: acc) id env s xs in
+
+  let (needs_gen, id) = collect (false, Z.zero) t in
+  if not needs_gen then (RSet.empty, t)
+  else
+    let (t, _, _, s) = rewrite id RMap.empty RSet.empty t in
+    (s, t)
+
+let check_datadef_variance (decl : datadef) : unit =
   let enter_variance from ctx = match from, ctx with
     | Invariant, _ | _, Invariant -> Invariant
     | _, Covariant -> from
@@ -131,8 +164,8 @@ let check_datadef_variance ((_, targs, cases) : datadef) : unit =
   let rec walk ctx = function
     | TyVar { contents = Link _ } as t ->
       t |> unwrap_shallow |> walk ctx
-    | TyPly (n, v) when Z.equal Z.zero v -> begin
-      match Hashtbl.find_opt m n, ctx with
+    | TyPly key -> begin
+      match Hashtbl.find_opt m key, ctx with
         | None, _
         | Some Invariant, _
         | Some Covariant, Covariant
@@ -144,20 +177,20 @@ let check_datadef_variance ((_, targs, cases) : datadef) : unit =
         | Some _, Covariant ->
           failwith "Usage requires covariant"
     end
-    | TyVar _ | TyPly _ | TyRigid _ -> ()
+    | TyVar _ -> ()
     | TyRef t -> walk Invariant t
     | TyArr (a, r) ->
       walk (enter_variance ctx Contravariant) a;
       walk ctx r
     | TyTup xs ->
       List.iter (walk ctx) xs
-    | TyDat ((_, params, _), xs) ->
+    | TyDat ({ args; _ }, xs) ->
       List.iter2 (fun (_, v) ->
-        walk (enter_variance ctx v)) params xs in
+        walk (enter_variance ctx v)) args xs in
 
-  List.iter (fun (n, v) -> Hashtbl.add m n v) targs;
+  List.iter (fun (n, v) -> Hashtbl.add m n v) decl.args;
   Hashtbl.iter (fun _ (_, _, sites) ->
-    List.iter (walk Covariant) sites) cases
+    List.iter (walk Covariant) sites) decl.cases
 
 let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = function
   | TyVar { contents = Link _ } as t ->
@@ -165,7 +198,7 @@ let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = func
   | TyVar ({ contents = Unbound (n, l1) } as r) ->
     if dangerous && Z.compare l2 l1 < 0 then
       r := Unbound (n, l2)
-  | TyPly _ | TyRigid _ -> ()
+  | TyPly _ -> ()
   | TyRef t ->
     drop_dangerous_level' l2 true t
   | TyArr (p, q) ->
@@ -173,10 +206,10 @@ let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = func
     drop_dangerous_level' l2 dangerous q
   | TyTup xs ->
     List.iter (drop_dangerous_level' l2 dangerous) xs
-  | TyDat ((_, params, _), xs) ->
+  | TyDat ({ args; _ }, xs) ->
     List.iter2 (function
       | (_, Covariant) -> drop_dangerous_level' l2 dangerous
-      | _ -> drop_dangerous_level' l2 true) params xs
+      | _ -> drop_dangerous_level' l2 true) args xs
 
 let drop_dangerous_level (l2 : level) (t : t) : unit =
   drop_dangerous_level' l2 false t
@@ -189,7 +222,7 @@ let rec occurs_unify (cell : tyvar ref) (l2 : level) : t -> unit = function
       failwith "Illegal infinite type construction";
     (* keep the lower level *)
     r := Unbound (n, Z.min l1 l2)
-  | TyPly (_, l1) | TyRigid (_, l1) ->
+  | TyPly (_, l1) ->
     if Z.compare l1 l2 >= 0 then
       failwith "Unification cause rigid type variable to escape its scope"
   | TyRef t ->
@@ -204,6 +237,9 @@ let rec unify_loop : (t * t) list -> unit = function
   | [] -> ()
   | (a, b) :: xs ->
     match a, b with
+      | _ when a == b ->
+        unify_loop xs
+
       | TyVar { contents = Link _ }, _
       | _, TyVar { contents = Link _ } ->
         unify_loop ((unwrap_shallow a, unwrap_shallow b) :: xs)
@@ -223,8 +259,7 @@ let rec unify_loop : (t * t) list -> unit = function
         r := Link t;
         unify_loop xs
 
-      | TyPly a, TyPly b
-      | TyRigid a, TyRigid b when a = b ->
+      | TyPly a, TyPly b when a = b ->
         unify_loop xs
 
       | TyRef a, TyRef b ->
@@ -252,8 +287,6 @@ let unify (a : t) (b : t) : unit =
   unify_loop [a, b]
 
 let bprint (buf : Buffer.t) (t : t) : unit =
-  let map = Hashtbl.create 32 in
-  let next_id = ref Z.one in
   let rec walk = function
     | TyVar { contents = Link _ } as t ->
       t |> unwrap_shallow |> walk
@@ -265,8 +298,8 @@ let bprint (buf : Buffer.t) (t : t) : unit =
   and walk_app = function
     | TyVar { contents = Link _ } as t ->
       t |> unwrap_shallow |> walk_app
-    | TyDat ((k, _, _), (_ :: _ as xs)) ->
-      Printf.bprintf buf "%s" k;
+    | TyDat ({ name; _ }, (_ :: _ as xs)) ->
+      Printf.bprintf buf "%s" name;
       List.iter (fun x -> Printf.bprintf buf " "; walk_atom x) xs;
     | TyRef t ->
       Printf.bprintf buf "ref ";
@@ -274,21 +307,13 @@ let bprint (buf : Buffer.t) (t : t) : unit =
     | t -> walk_atom t
   and walk_atom = function
     | TyVar { contents = Link _ } as t ->
-      t |> unwrap_shallow |> walk
+      t |> unwrap_shallow |> walk_atom
     | TyVar { contents = Unbound (id, _) } ->
       Printf.bprintf buf "$%a" Z.bprint id
-    | TyPly n ->
-      let n = match Hashtbl.find_opt map n with
-        | Some n -> n
-        | None ->
-          let id = !next_id in
-          let name = Printf.sprintf "t%a" Z.sprint id in
-          Hashtbl.add map n name;
-          next_id := Z.succ id;
-          name in
-      Printf.bprintf buf "%s" n
-    | TyRigid (id, _) ->
-      Printf.bprintf buf "?%a" Z.bprint id
+    | TyPly (n, l) when Z.zero = l ->
+      Printf.bprintf buf "t%a" Z.bprint n
+    | TyPly (n, l) ->
+      Printf.bprintf buf "t%a_%a" Z.bprint n Z.bprint l
     | TyTup [] ->
       Printf.bprintf buf "{}"
     | TyTup (x :: xs) ->
@@ -296,8 +321,8 @@ let bprint (buf : Buffer.t) (t : t) : unit =
       walk x;
       List.iter (fun x -> Printf.bprintf buf ", "; walk x) xs;
       Printf.bprintf buf " }"
-    | TyDat ((k, _, _), []) ->
-      Buffer.add_string buf k
+    | TyDat ({ name; _ }, []) ->
+      Buffer.add_string buf name
     | t ->
       Printf.bprintf buf "(";
       walk t;

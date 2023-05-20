@@ -8,7 +8,7 @@ and root =
   | RExpr of expr
 
 and datadef =
-  string * (bool option * string) list * (string * string list * texpr list) list
+  string * (bool option * string) list * (string * texpr list) list
 
 and expr =
   | ESeq of expr NonEmpty.t
