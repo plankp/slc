@@ -195,6 +195,8 @@ let rec is_value = function
     List.for_all (function
       | Ast.BValue (_, [], e) -> is_value e
       | Ast.BAnnot _ | Ast.BValue _ -> true) bs
+  | Ast.ESeq (x, xs) ->
+    List.for_all is_value (x :: xs)
   | _ -> false
 
 let is_value_binder_rhs = function
