@@ -104,7 +104,7 @@ binder:
 
 cases:
   | x = case SEMI xs = cases { x :: xs }
-  | x = case { [x] }
+  | x = case SEMI? { [x] }
 
 case:
   | p = pattern ARROW e = expr { (p, e) }
@@ -167,5 +167,4 @@ exprs:
 
 exprs_semi:
   | x = expr SEMI xs = exprs_semi { NonEmpty.cons x xs }
-  | x = expr SEMI { NonEmpty.singleton x }
-  | x = expr { NonEmpty.singleton x }
+  | x = expr SEMI? { NonEmpty.singleton x }
