@@ -99,7 +99,7 @@ binders:
   | x = binder { [x] }
 
 binder:
-  | n = LNAME p = pattern* SET i = expr { BValue (n, p, i) }
+  | n = LNAME p = pattern_atom* SET i = expr { BValue (n, p, i) }
   | n = LNAME COLON t = texpr { BAnnot (n, t) }
 
 cases:

@@ -4,11 +4,24 @@ We went a bit further than simply lambda calculus... Whatever :metal:
 
 ## Build instructions
 
-```sh
-dune exec --display=quiet slc
+```
+$ dune build slc
 ```
 
-and then you punch in all your code then end with Ctrl-D or whatever your shell uses as EOF.
+and then you can execute the `slc` program (should be under the `_build/install/default/bin` directory):
+
+```
+$ slc --help
+
+slc <options> <files>
+  -entry Mark a module as an entry point
+  -Xdump-hir Dump HIR (for debugging purposes)
+  -Xdump-lir Dump LIR (for debugging purposes)
+  -help  Display this list of options
+  --help  Display this list of options
+```
+
+for example, you can take the sample snippet, save it in `Sample.sl`, and feed it to `slc`.
 
 ## Sample snippet
 
