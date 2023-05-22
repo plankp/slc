@@ -335,5 +335,7 @@ let lower e =
   printf "    pushq %%rbp\n";
   printf "    movq %%rsp, %%rbp\n";
   printf "    callq _GC_init\n";
+  printf "    callq _module_INIT\n";
+  printf "    movl %%edx, %%eax\n";
   printf "    leaveq\n";
-  printf "    jmp _module_INIT\n"
+  printf "    retq\n"
