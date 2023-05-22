@@ -3,52 +3,13 @@ open Hir
 module S = Set.Make (Int)
 module M = Map.Make (Int)
 
-type 'a vertex =
-  { info : 'a
-  ; deps : S.t
-  ; mutable index : int option
-  ; mutable lowlink : int
-  ; mutable onstack : bool
-  }
-
-let compute_levels (g : 'a vertex M.t) : 'a vertex list list =
-  (* use Tarjan's scc *)
-  let index = ref 0 in
-  let stack = ref [] in
-  let rebuild = ref [] in
-
-  let rec connect v =
-    v.index <- Some !index;
-    v.lowlink <- !index;
-    v.onstack <- true;
-    index := !index + 1;
-    stack := v :: !stack;
-
-    S.iter (fun w ->
-      let w = M.find w g in
-      match w.index with
-        | None ->
-          connect w;
-          v.lowlink <- min v.lowlink w.lowlink
-        | Some w_index ->
-          if w.onstack then
-            v.lowlink <- min v.lowlink w_index) v.deps;
-
-    if Some v.lowlink = v.index then begin
-      let rec loop scc =
-        match !stack with
-          | [] -> failwith "INVALID STATE"
-          | w :: xs ->
-            stack := xs;
-            w.onstack <- false;
-            let scc = w :: scc in
-            if w != v then loop scc
-            else rebuild := scc :: !rebuild in
-      loop []
-    end in
-
-  M.iter (fun _ v -> if v.index = None then connect v) g;
-  !rebuild
+let fetch_or_new g f =
+  match Hashtbl.find_opt g f with
+    | Some v -> v
+    | None ->
+      let v = Tarjan.new_vertex None in
+      Hashtbl.add g f v;
+      v
 
 let rec transform s r = match !r with
   | Module _ ->
@@ -108,27 +69,30 @@ let rec transform s r = match !r with
       (S.add f defs, (info, s) :: xs)) (S.empty, []) bs in
 
     (* build the dependency graph of the bindings *)
-    let g = List.fold_left (fun g (info, fvs) ->
+    let g = Hashtbl.create 32 in
+    List.iter (fun (info, fvs) ->
       let (f, _, _, _, _) = info in
-      let v =
-        { info = (info, fvs); deps = S.inter fvs defs
-        ; index = None; lowlink = ~-1; onstack = false } in
-      M.add f v g) M.empty fvs in
+      let v = fetch_or_new g f in
+      Tarjan.set_info v (Some (info, fvs));
+      let deps = S.inter fvs defs in
+      S.iter (fun n ->
+        Tarjan.add_edge v (fetch_or_new g n)) deps) fvs;
 
     let s = transform s next in
-    let rebuild = compute_levels g in
+    let rebuild = g |> Hashtbl.to_seq_values |> Tarjan.compute_scc in
     let (s, e) = List.fold_left (fun (s, e) scc ->
-      let is_dead = not @@ List.exists (fun { info = (info, _); _ } ->
-        let (f, _, _, _, _) = info in S.mem f s) scc in
+      let is_dead = not @@ List.exists (fun node ->
+        let ((f, _, _, _, _), _) = node |> Tarjan.get_info |> Option.get in
+        S.mem f s) scc in
       if is_dead then (s, e)
       else begin
         match scc with
-          | [{ info = ((f, _, _, _, _) as info, fv); deps; _ }]
-            when not (S.mem f deps) ->
+          | [node] when not (Tarjan.has_edge node node) ->
+            let (info, fv) = node |> Tarjan.get_info |> Option.get in
             (S.union fv s, LetFun (info, ref e))
           | _ ->
-            let (s, bs) = List.fold_left (fun (s, xs) { info; _ } ->
-              let (info, fv) = info in
+            let (s, bs) = List.fold_left (fun (s, xs) node ->
+              let (info, fv) = node |> Tarjan.get_info |> Option.get in
               (S.union fv s, info :: xs)) (s, []) scc in
             (s, LetRec (bs, ref e))
       end) (s, !next) rebuild in
@@ -142,22 +106,25 @@ let rec transform s r = match !r with
       (S.add j defs, (info, s) :: xs)) (S.empty, []) bs in
 
     (* build the dependency graph of the bindings *)
-    let g = List.fold_left (fun g (info, fvs) ->
+    let g = Hashtbl.create 32 in
+    List.iter (fun (info, fvs) ->
       let (j, _, _) = info in
-      let v =
-        { info = (info, fvs); deps = S.inter fvs defs
-        ; index = None; lowlink = ~-1; onstack = false } in
-      M.add j v g) M.empty fvs in
+      let v = fetch_or_new g j in
+      Tarjan.set_info v (Some (info, fvs));
+      let deps = S.inter fvs defs in
+      S.iter (fun n ->
+        Tarjan.add_edge v (fetch_or_new g n)) deps) fvs;
 
     let s = transform s next in
-    let rebuild = compute_levels g in
+    let rebuild = g |> Hashtbl.to_seq_values |> Tarjan.compute_scc in
     let (s, e) = List.fold_left (fun (s, e) scc ->
-      let is_dead = not @@ List.exists (fun { info = (info, _); _ } ->
-        let (j, _, _) = info in S.mem j s) scc in
+      let is_dead = not @@ List.exists (fun node ->
+        let ((j, _, _), _) = node |> Tarjan.get_info |> Option.get in
+        S.mem j s) scc in
       if is_dead then (s, e)
       else begin
-        let (s, bs) = List.fold_left (fun (s, xs) { info; _ } ->
-          let (info, fv) = info in
+        let (s, bs) = List.fold_left (fun (s, xs) node ->
+          let (info, fv) = node |> Tarjan.get_info |> Option.get in
           (S.union fv s, info :: xs)) (s, []) scc in
         (s, LetCont (bs, ref e))
       end) (s, !next) rebuild in
