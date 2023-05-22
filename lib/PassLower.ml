@@ -1,254 +1,339 @@
-open Hir
+open Lir
 open Printf
 
-module M = Map.Make (Int)
+(* Here we just show it works, emitted code is terrible:
+ *
+ * assumes all values are 64-bits
+ * rsp and rbp business as usual (may omit rbp)
+ * for internal calls, the stack looks like this:
+ *
+ * | free space  |
+ * | return addr | <- rsp
+ * |   arg 5     | <- rsp+8
+ * |   arg 6     |
+ * |   arg 7+    |
+ *
+ * args 1, 2, 3, 4 are passed via rdi, rsi, rcx, rdx
+ * return value goes into rax and edx (see below)
+ * these registers are caller-saved
+ * caller cleans up the arguments
+ *
+ * in our simplified model, a non-zero edx indicates an exception has
+ * happened. in this case, rax holds the value thrown. the caller looks at rdx
+ * after each call and decides if unwinding is needed.
+ *
+ * foreign calls clearly have to comply with whatever calling convention they
+ * use.
+ *
+ * we synthesize a main function which calls the module initializer.
+ * link with a gc library (expects GC_init and GC_malloc symbols).
+ *)
 
-let rec lower_function q f args k h body id =
-  let buf = Buffer.create 32 in
-  bprintf buf "define tailcc ptr @f%d(" f;
-  let sv = match args with
-    | [] -> M.empty
+let rec map_module_value : value -> unit = function
+  | Local _ -> failwith "Module level value cannot reference a local value"
+  | Label _ -> failwith "Cannot map a label without a Globl name"
+  | Globl n ->
+    printf "    .quad _module_%s\n" n
+  | Int64 v ->
+    printf "    .quad %Lu\n" v
+  | Flt64 v ->
+    printf "    .quad 0x%Lx   # double %e\n" (Int64.bits_of_float v) v
+  | Tuple xs ->
+    List.iter map_module_value xs
+
+let alloc_locals ((args, _, blocks) : label) =
+  (* do the dumbest thing, which is to allocate everything onto the stack even
+   * if it is not simultaneously live. *)
+
+  (* by SSA rules, any name is only assigned once, hence this scheme is dumb,
+   * but notice that the incoming arguments are also never modified. that
+   * means we conservatively move args 1 to 4 onto the stack, the rest just
+   * fetch from the stack directly! *)
+  let rec collect_regargs idx offs acc = function
+    | xs when idx = 0 -> (acc, offs, xs)
+    | [] -> (acc, offs, [])
     | x :: xs ->
-      bprintf buf "ptr %%v%d" x;
-      let sv = M.singleton x (sprintf "%%v%d" x) in
-      List.fold_left (fun sv x ->
-        bprintf buf ", ptr %%v%d" x;
-        M.add x (sprintf "%%v%d" x) sv) sv xs in
-  bprintf buf ") personality ptr @__gxx_personality_v0 {\n";
-  bprintf buf "_0:\n";
-  let (q, id) = lower_value q "_0" (Some k) (Some h) sv M.empty id buf !body in
-  bprintf buf "}";
-  buf :: q, id
+      collect_regargs (idx - 1) (offs - 8) (M.add x offs acc) xs in
 
-and lower_value q label k h sv sk id buf = function
-  | LetFun ((f, args, k', h', body), e) ->
-    let (q, id) = lower_function q f args k' h' body id in
-    lower_value q label k h (M.add f (sprintf "@f%d" f) sv) sk id buf !e
+  let rec collect_stackargs offs acc = function
+    | [] -> (acc, offs)
+    | x :: xs ->
+      collect_stackargs (offs + 8) (M.add x offs acc) xs in
 
-  | LetCont (bs, e) ->
-    let sk = List.fold_left (fun sk (j, args, _) ->
-      let slots = List.map (fun _ -> ref []) args in
-      M.add j slots sk) sk bs in
-    let (q, id) = lower_value q label k h sv sk id buf !e in
-    let (xs, q, id) = List.fold_left (fun (xs, q, id) (j, args, body) ->
-      let buf = Buffer.create 32 in
-      let sv = List.fold_left (fun sv a ->
-        M.add a (sprintf "%%v%d" a) sv) sv args in
-      let (q, id) = lower_value q (sprintf "k%d" j) k h sv sk id buf !body in
-      ((j, args, buf) :: xs, q, id)) ([], q, id) bs in
+  let collect_locals offs acc blocks =
+    M.fold (fun _ (args, instrs, _) acc ->
+      let acc = List.fold_left (fun (acc, offs) arg ->
+        (M.add arg offs acc, offs - 8)) acc args in
+      let acc = List.fold_left (fun (acc, offs) -> function
+        | ICall (n, _, _) | IOffs (n, _, _) | IPack (n, _) | ILoad (n, _) ->
+          (M.add n offs acc, offs - 8)
+        | IStore _ -> (acc, offs)) acc instrs in
+      acc) blocks (acc, offs) in
 
-    List.iter (fun (j, args, blq) ->
-      bprintf buf "k%d:\n" j;
-      List.iter2 (fun a p ->
-        bprintf buf "  %%v%d = phi ptr" a;
-        let () = match !p with
-          | [] -> ()  (* shouldn't happen *)
-          | (v, j) :: xs ->
-            bprintf buf " [%s, %%%s]" v j;
-            List.iter (fun (v, j) ->
-              bprintf buf ", [%s, %%%s]" v j) xs in
-        bprintf buf "\n") args (M.find j sk);
-      Buffer.add_buffer buf blq) xs;
-    (q, id)
+  (* offsets assume rbp relative indices (of course rbp saved) *)
+  let (m, offs, xs) = collect_regargs 4 (-8) M.empty args in
+  let (m, _) = collect_stackargs 16 m xs in
+  let (m, offs) = collect_locals offs m blocks in
+  (m, -(offs + 8))
 
-  | LetPack (v, [], e) ->
-    (* we use NULL for this *)
-    lower_value q label k h (M.add v "null" sv) sk id buf !e
+let map_module_label prefix (((args, entry, blocks) as lbl) : label) =
+  let (m, maxstack) = alloc_locals lbl in
 
-  | LetPack (v, elts, e) ->
-    let width = List.length elts |> Int64.of_int |> Int64.mul 8L in
-    bprintf buf "  %%v%d = call ptr @GC_MALLOC(i64 noundef %Ld)\n" v width;
-    let (id, _) = List.fold_left (fun (id, i) (_, e) ->
-      bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %%v%d, i64 %d\n" v id v i;
-      bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find e sv) v id;
-      (Int64.succ id, i + 1)) (id, 0) elts in
-    lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk id buf !e
+  let rec map_regargs names slots = match names, slots with
+    | arg :: xs, reg :: ys ->
+      printf "    movq %s, %d(%%rbp)  # $%s\n" reg (M.find arg m) arg;
+      map_regargs xs ys
+    | _ -> () in
 
-  | LetCons (v, i, elts, e) ->
-    (* 32-bit tag + a 64-bit pointer for each element *)
-    let width = List.length elts |> Int64.of_int |> Int64.mul 8L in
-    let width = if width = 0L then 4L else Int64.add width 8L in
-    bprintf buf "  %%v%d = call ptr @GC_MALLOC(i64 noundef %Ld)\n" v width;
-    bprintf buf "  %%v%d.t = getelementptr i32, ptr %%v%d, i64 0\n" v v;
-    bprintf buf "  store i32 %d, ptr %%v%d.t\n" i v;
-    let (id, _) = List.fold_left (fun (id, i) e ->
-      bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %%v%d, i64 %d\n" v id v i;
-      bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find e sv) v id;
-      (Int64.succ id, i + 1)) (id, 1) elts in
-    lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk id buf !e
+  printf "    pushq %%rbp\n";
+  printf "    movq %%rsp, %%rbp\n";
+  printf "    subq $%d, %%rsp\n" maxstack;
+  map_regargs args ["%rdi"; "%rsi"; "%rcx"; "%rdx"];
 
-  | LetProj (v, i, t, e) ->
-    bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %s, i64 %d\n" v id (M.find t sv) i;
-    bprintf buf "  %%v%d = load ptr, ptr %%v%d.%Lu\n" v v id;
-    lower_value q label k h (M.add v (sprintf "%%v%d" v) sv) sk (Int64.succ id) buf !e
+  let load_simple_value reg = function
+    | Tuple [] -> ()
+    | Local v ->
+      printf "    movq %d(%%rbp), %s  # $%s\n" (M.find v m) reg v
+    | Globl v ->
+      printf "    leaq _module_%s(%%rip), %s\n" v reg
+    | Int64 v ->
+      printf "    movq $%Lu, %s\n" v reg
+    | Flt64 v ->
+      printf "    movq $0x%Lu, %s  # double %e\n" (Int64.bits_of_float v) reg v
+    | _ -> failwith "VALUE IS NOT SIMPLE" in
 
-  | Export xs ->
-    List.iter (fun (n, v) ->
-      bprintf buf "  store ptr %s, ptr @G_%s, align 8\n" (M.find v sv) n) xs;
-    q, id
+  let map_block n ((_, instrs, tail) : block) =
+    printf ".L%s_%s:\n" prefix n;
 
-  (* return *)
-  | Jmp (j, [v]) when k = Some j ->
-    bprintf buf "  ret ptr %s\n" (M.find v sv);
-    q, id
+    let map_usual_call f args =
+      let rec load_regargs names slots = match names, slots with
+        | arg :: xs, reg :: ys ->
+          load_simple_value reg arg;
+          load_regargs xs ys
+        | args, _ -> args in
 
-  (* throw / raise an exception *)
-  | Jmp (j, [v]) when h = Some j ->
-    bprintf buf "  %%q.%Lu = call ptr @__cxa_allocate_exception(i64 8)\n" id;
-    bprintf buf "  store ptr %s, ptr %%q.%Lu\n" (M.find v sv) id;
-    bprintf buf "  call void @__cxa_throw(ptr %%q.%Lu, ptr @_ZTIPv, ptr null)\n" id;
-    bprintf buf "  unreachable\n";
-    q, Int64.succ id
+      let stackargs = load_regargs args ["%rdi"; "%rsi"; "%rcx"; "%rdx"] in
+      let () = stackargs
+        |> List.rev
+        |> List.iter (fun a ->
+          load_simple_value "%rax" a;
+          printf "    pushq %%rax\n") in
+      let () = match f with
+        | Globl f ->
+          printf "    callq _module_%s\n" f;
+        | _ ->
+          load_simple_value "%rax" f;
+          printf "    jmpq *%%rax\n" in
 
-  (* goto / branch to block *)
-  | Jmp (j, args) ->
-    let params = M.find j sk in
-    List.iter2 (fun p a -> p := (M.find a sv, label) :: !p) params args;
-    bprintf buf "  br label %%k%d\n" j;
-    q, id
+      (* call has returned, so cleanup the stack *)
+      printf "    addq $%d, %%rsp\n" (8 * List.length stackargs) in
 
-  (* mutation: the continuation j has to be a block without phi edges *)
-  | Mutate (v, i, u, j) ->
-    bprintf buf "  %%v%d.%Lu = getelementptr ptr, ptr %s, i64 %d\n" v id (M.find v sv) i;
-    bprintf buf "  store ptr %s, ptr %%v%d.%Lu\n" (M.find u sv) v id;
-    bprintf buf "  br label %%k%d\n" j;
-    q, id
+    List.iter (function
+      | ICall (dst, f, args) ->
+        map_usual_call f args;
+        (* manually unwind on exception *)
+        printf "    testl %%eax, %%eax\n";
+        printf "    jz 0f\n";
+        printf "    leaveq\n";
+        printf "    retq\n";
+        printf "0:  movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
-  | Case (v, cases) ->
-    let v = M.find v sv in
-    bprintf buf "  %%tag.%Lu = load i32, ptr %s\n" id v;
-    bprintf buf "  switch i32 %%tag.%Lu, label %%case.%Lu.else [\n" id id;
-    let has_default = ref false in
-    Hir.M.iter (fun i _ ->
-      match i with
-        | Some i -> bprintf buf "    i32 %d, label %%case.%Lu.%d\n" i id i
-        | _ -> has_default := true) cases;
-    bprintf buf "  ]\n";
+      | IOffs (dst, addr, offs) ->
+        load_simple_value "%rax" addr;
+        printf "    addq $%Lu, %%rax\n" (Int64.mul 8L offs);
+        printf "    movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
-    if not !has_default then begin
-      (* assume a lack of explicit default case means it is unreachable! *)
-      bprintf buf "case.%Lu.else:\n" id;
-      bprintf buf "  unreachable\n"
-    end;
-    let id = Hir.M.fold (fun i j fresh ->
-      let label = match i with
-        | Some i -> sprintf "case.%Lu.%d" id i
-        | _ -> sprintf "case.%Lu.else" id in
-      bprintf buf "%s:\n" label;
+      | ILoad (dst, Globl sym) ->
+        printf "    movq _module_%s(%%rip), %%rax\n" sym;
+        printf "    movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
-      (* like in Jmp, handle the three possibilities *)
-      if Some j = k then begin
-        bprintf buf "  %%q.%Lu.p = getelementptr ptr, ptr %s, i64 1\n" fresh v;
-        bprintf buf "  %%q.%Lu.v = load ptr, ptr %%q.%Lu.p\n" fresh fresh;
-        bprintf buf "  ret ptr %%q.%Lu.v" fresh;
-        Int64.succ fresh
-      end else if Some j = h then begin
-        bprintf buf "  %%q.%Lu.p = getelementptr ptr, ptr %s, i64 1\n" fresh v;
-        bprintf buf "  %%q.%Lu.v = load ptr, ptr %%q.%Lu.p\n" fresh fresh;
-        bprintf buf "  %%q.%Lu = call ptr @__cxa_allocate_exception(i64 8)\n" fresh;
-        bprintf buf "  store ptr %%q.%Lu.v, ptr %%q.%Lu\n" fresh fresh;
-        bprintf buf "  call void @__cxa_throw(ptr %%q.%Lu, ptr @_ZTIPv, ptr null)\n" fresh;
-        bprintf buf "  unreachable\n";
-        Int64.succ fresh
-      end else begin
-        let params = M.find j sk in
-        let _ = List.fold_left (fun offs p ->
-          bprintf buf "  %%q.%Lu.l%d = getelementptr ptr, ptr %s, i64 %d\n" fresh offs v offs;
-          bprintf buf "  %%q.%Lu.v%d = load ptr, ptr %%q.%Lu.l%d\n" fresh offs fresh offs;
-          p := (sprintf "%%q.%Lu.v%d" fresh offs, label) :: !p;
-          offs + 1) 1 params in
-        bprintf buf "  br label %%k%d\n" j;
-        fresh
-      end) cases (Int64.succ id) in
-    q, id
+      | ILoad (dst, addr) ->
+        load_simple_value "%rax" addr;
+        printf "    movq (%%rax), %%rax\n";
+        printf "    movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
-  (* function calls, which is either
-   * a tail call, an ordinary call, or a call with an exception handler *)
-  | App (f, args, j1, j2) ->
-    let is_tail_call = k = Some j1 && h = Some j2 in
-    let needs_ehandler = h <> Some j2 in
+      | IStore (v, Globl sym) ->
+        load_simple_value "%rax" v;
+        printf "    movq %%rax, _module_%s(%%rip)\n" sym
 
-    let specifier =
-      if is_tail_call then "musttail call"
-      else if needs_ehandler then "invoke"
-      else "call" in
-    bprintf buf "  %%q.%Lu = %s tailcc ptr %s(" id specifier (M.find f sv);
-    let () = match args with
-      | [] -> ()
-      | x :: xs ->
-        bprintf buf "ptr %s" (M.find x sv);
-        List.iter (fun x -> bprintf buf ", ptr %s" (M.find x sv)) xs in
-    bprintf buf ")\n";
+      | IStore (v, addr) ->
+        load_simple_value "%rax" addr;
+        load_simple_value "%rdi" v;
+        printf "    movq %%rdi, (%%rax)\n"
 
-    let id = Int64.succ id in
-    let id = if is_tail_call then begin
-      bprintf buf "  ret ptr %%q.%Lu\n" id;
-      id
-    end else begin
-      (* regardless of whether a handler is needed, the continuation k needs
-       * it's incoming phi edges hooked-up *)
-      let params = M.find j1 sk in
-      List.iter2 (fun p a -> p := a :: !p) params
-        [sprintf "%%q.%Lu" id, label];
+      | IPack (dst, elts) ->
+        printf "    movq $%d, %%rdi\n" (8 * List.length elts);
+        printf "    callq _GC_malloc\n";
+        List.iteri (fun i e ->
+          load_simple_value "%rdx" e;
+          printf "    movq %%rdx, %d(%%rax)\n" (8 * i)) elts;
+        printf "    movq %%rax, %d(%%rbp)\n" (M.find dst m)) instrs;
 
-      if not needs_ehandler then begin
-        bprintf buf "  br label %%k%d\n" j1;
-        id
-      end else begin
-        (* the success continuation is done setup, but we need to also deal
-         * with the handler. here we synthesize a dummy landing pad that will
-         * extract the caught value and jump to the continuation h. *)
-        bprintf buf "  to label %%k%d unwind label %%lpad.%Lu\n" j1 id;
-        bprintf buf "lpad.%Lu:\n" id;
-        bprintf buf "  %%info.%Lu = landingpad { ptr, i32 } catch ptr @_ZTIPv\n" id;
-        bprintf buf "  %%except.%Lu = extractvalue { ptr, i32 } %%info.%Lu, 0\n" id id;
-        bprintf buf "  %%selector.%Lu = extractvalue { ptr, i32 } %%info.%Lu, 1\n" id id;
-        bprintf buf "  %%typeid.%Lu = call i32 @llvm.eh.typeid.for(ptr @_ZTIPv)\n" id;
-        bprintf buf "  %%match.%Lu = icmp eq i32 %%selector.%Lu, %%typeid.%Lu\n" id id id;
-        bprintf buf "  br i1 %%match.%Lu, label %%catch.%Lu, label %%end.%Lu \n" id id id;
-        bprintf buf "catch.%Lu:\n" id;
-        bprintf buf "  %%thrown.%Lu = call ptr @__cxa_begin_catch(ptr %%except.%Lu)\n" id id;
-        bprintf buf "  call void @__cxa_end_catch()\n";
-        bprintf buf "  br label %%k%d\n" j2;
-        bprintf buf "end.%Lu:\n" id;
-        bprintf buf "  resume { ptr, i32 } %%info.%Lu\n" id;
+    match tail with
+      | KDead ->
+        printf "    # (unreachable)\n"
 
-        let params = M.find j2 sk in
-        List.iter2 (fun p a -> p := a :: !p) params
-          [sprintf "%%thrown.%Lu" id, sprintf "catch.%Lu" id];
-        Int64.succ id
-      end
-    end in
-    q, id
+      | KRetv v ->
+        load_simple_value "%rax" v;
+        printf "    xorl %%edx, %%edx\n";
+        printf "    leaveq\n";
+        printf "    retq\n"
 
-  | _ -> failwith "Unsupported lowering"
+      | KThrow v ->
+        load_simple_value "%rax" v;
+        printf "    movl $1, %%edx\n";
+        printf "    leaveq\n";
+        printf "    retq\n"
+
+      | KCase (v, k, cases) ->
+        (* keep it simple and emit linear search *)
+        load_simple_value "%rax" v;
+        List.iter (fun (v, k) ->
+          printf "    cmpq $%Lu, %%rax\n" v;
+          printf "    je .L%s_%s" prefix k) cases;
+        printf "    jmp .L%s_%s\n" prefix k
+
+      | KCatch (f, k, h, args) ->
+        map_usual_call f args;
+
+        (* jump to the corresponding contination depending on edx *)
+        let (kparam, _, _) = M.find k blocks in
+        let (hparam, _, _) = M.find h blocks in
+        printf "    testq %%edx, %%edx\n";
+        printf "    jnz 0f\n";
+        printf "    movq %%rax, %d(%%rbp)\n" (M.find (List.hd kparam) m);
+        printf "    jmp .L%s_%s\n" prefix k;
+        printf "0:  movq %%rax, %d(%%rbp)\n" (M.find (List.hd hparam) m);
+        printf "    jmp .L%s_%s\n" prefix h;
+
+      | KJump (k, args) ->
+        (* make a simplification and say that every local phi move might
+         * overwrite the value (which is definitely not true) and use the
+         * stack for those cases. *)
+        let (params, _, _) = M.find k blocks in
+        let easy, diff = List.fold_left2 (fun (easy, diff) p a ->
+          match a, p with
+            | Local a, b when a = b -> (easy, diff)
+            | Local _, _ -> (easy, (p, a) :: diff)
+            | _ -> ((p, a) :: easy, diff)) ([], []) params args in
+
+        let diff = List.fold_left (fun diff (p, a) ->
+          load_simple_value "%rax" a;
+          printf "    pushq %%rax\n";
+          p :: diff) [] diff in
+        List.iter (fun p ->
+          printf "    popq %%rax\n";
+          printf "    movq %%rax, %d(%%rbp)\n" (M.find p m)) diff;
+        List.iter (fun (p, a) ->
+          load_simple_value "%rax" a;
+          printf "    movq %%rax, %d(%%rbp)\n" (M.find p m)) easy;
+        printf "    jmp .L%s_%s\n" prefix k
+
+      | KCall (f, args) -> begin
+        let try_pass_by_reg names slots =
+          let rec loop acc names slots = match names, slots with
+            | arg :: xs, reg :: ys ->
+              loop ((reg, arg) :: acc) xs ys
+            | [], _ -> Some acc
+            | _ -> None in
+          loop [] names slots in
+
+        let () = match try_pass_by_reg args ["%rdi"; "%rsi"; "%rcx"; "%rdx"] with
+          | Some acc ->
+            List.iter (fun (r, a) -> load_simple_value r a) acc;
+            printf "    leaveq\n"
+          | None ->
+            (* right now, our stack looks like this:
+             *
+             * | locals  |
+             * | old rbp | <- reference point
+             * | retaddr |
+             *
+             * we want to turn it into this:
+             *
+             * | retaddr |
+             * | arg 5+  |
+             * | arg n-1 | <- reference point (with rbp restored)
+             * | arg n   |
+             *)
+            printf "    movq (%%rbp), %%rsi\n";   (* old rbp *)
+            printf "    movq 8(%%rbp), %%rdi\n";  (* old return address *)
+
+            let len = List.length args in
+
+            (*
+| arg 1   | <- rsp
+| ...     |
+| arg 4   |
+| arg 5   | <- rsp + 8*4
+| arg 6   | <- rsp + 8*5
+| locals? |
+| old rbp | <-
+| retaddr |
+             *)
+            let () = args
+              |> List.rev
+              |> List.iter (fun a ->
+                load_simple_value "%rax" a;
+                printf "    pushq %%rax\n") in
+
+            (*
+| arg 1   | \
+| ...     |  |
+| arg 3   |  | this part is effectively garbage after this step
+| arg 4   |  |
+| locals? | /
+| retaddr | <- rsp
+| arg 5   | <-
+| arg 6   |
+            *)
+            let rec loop len offs =
+              if len = 4 then begin
+                printf "    leaq %d(%%rbp), %%rax" offs;
+                printf "    movq %%rdi, %d(%%rbp)\n" offs;
+                printf "    movq %%rsi, %%rbp\n";
+                printf "    movq (%%rsp), %%rdi\n";
+                printf "    movq 8(%%rsp), %%rsi\n";
+                printf "    movq 16(%%rsp), %%rcx\n";
+                printf "    movq 24(%%rsp), %%rdx\n";
+                printf "    movq %%rax, %%rsp\n";
+              end else begin
+                printf "    movq %d(%%rsp), %%rax\n" (8 * (len - 1));
+                printf "    movq %%rax, %d(%%rbp)\n" offs;
+                loop (len - 1) (offs - 8)
+              end in
+            loop len 8 in
+        match f with
+          | Globl f ->
+            printf "    jmp _module_%s\n" f;
+          | _ ->
+            load_simple_value "%rax" f;
+            printf "    jmpq *%%rax\n"
+      end in
+
+  let (m1, b1, m2) = M.split entry blocks in
+  map_block entry (Option.get b1);
+  M.iter map_block m1;
+  M.iter map_block m2
 
 let lower e =
-  let _ = PassReindex.reindex e in
-  match e with
-    | Module (v, h, m) ->
-      let buf = Buffer.create 32 in
-      bprintf buf "define void @INIT() personality ptr @__gxx_personality_v0 {\n";
-      bprintf buf "_0:\n";
-      let (q, _) = lower_value [] "_0" None (Some !h) M.empty M.empty 1L buf !m in
-      bprintf buf "  ret void\n";
-      bprintf buf "}";
+  M.iter (fun n -> function
+    | Label lbl ->
+      printf "    .text\n";
+      printf "    .global _module_%s\n" n;
+      printf "_module_%s:\n" n;
+      map_module_label n lbl
+    | v ->
+      printf "    .data\n";
+      printf "    .global _module_%s\n" n;
+      printf "_module_%s:\n" n;
+      map_module_value v) e;
 
-      printf "declare ptr @GC_MALLOC(i64)\n";
-      printf "declare ptr @__cxa_allocate_exception(i64)\n";
-      printf "declare void @__cxa_throw(ptr, ptr, ptr)\n";
-      printf "declare ptr @__cxa_begin_catch(ptr)\n";
-      printf "declare ptr @__cxa_end_catch()\n";
-      printf "declare i32 @llvm.eh.typeid.for(ptr)\n";
-      printf "declare i32 @__gxx_personality_v0(...)\n";
-      printf "\n";
-      printf "@_ZTIPv = external constant ptr\n";
-      printf "\n";
-      List.iter (printf "@G_%s = global ptr null, align 8\n") v;
-      printf "\n";
-
-      let q = List.rev_append q [buf] in
-      List.iter (fun buf ->
-        Buffer.output_buffer stdout buf;
-        printf "\n\n") q
-    | _ -> failwith "INVALID TERM ANCHOR"
+  printf "    .text\n";
+  printf "    .globl _main\n";
+  printf "_main:\n";
+  printf "    pushq %%rbp\n";
+  printf "    movq %%rsp, %%rbp\n";
+  printf "    callq _GC_init\n";
+  printf "    leaveq\n";
+  printf "    jmp _module_INIT\n"
