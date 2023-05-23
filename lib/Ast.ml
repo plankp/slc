@@ -25,6 +25,7 @@ and expr =
   | ETyped of expr * texpr
   | EAssign of expr * expr
   | EDeref of expr
+  | EModVar of string * string
 
 and binder =
   | BValue of string * pat list * expr

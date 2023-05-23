@@ -47,6 +47,9 @@ let rec check_same_return s r = match !r with
     if S.mem t s then Divergent
     else check_same_return (S.remove v s) r
 
+  | LetExtn (v, _, _, r) ->
+    check_same_return (S.remove v s) r
+
   | LetCont (bs, next) ->
     let q = check_same_return s next in
     List.fold_left (fun q (_, args, body) ->
@@ -112,6 +115,9 @@ let rec contify r = match !r with
 
   | LetProj (v, _, t, r) ->
     contify r |> S.remove v |> S.add t
+
+  | LetExtn (v, _, _, r) ->
+    contify r |> S.remove v
 
   | LetCont (bs, r) ->
     let s = contify r in
@@ -316,7 +322,8 @@ let rec fold_cont s r flag = match !r with
 
   | LetPack (_, _, r)
   | LetCons (_, _, _, r)
-  | LetProj (_, _, _, r) ->
+  | LetProj (_, _, _, r)
+  | LetExtn (_, _, _, r) ->
     fold_cont s r flag
 
 let rec transform e =

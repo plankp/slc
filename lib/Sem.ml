@@ -1,9 +1,55 @@
-(* This module type checks the surface syntax and lowers it into Hir *)
+(* This module checks the surface syntax and lowers it into Hir
+ *
+ * checking consists of various parts, including:
+ * -  figuring out the what modules are needed
+ * -  type checking (obviously)
+ * -  checking for invalid syntactic forms
+ *)
 
 open Hir
 
 module M = Map.Make (String)
 module S = Set.Make (String)
+
+(* look for specific module related constructs to derive a dependency graph *)
+let resolve_module_deps (_, root) =
+  let rec loop_root s = function
+    | [] -> s
+    | (Ast.RLet binds | Ast.RRec binds) :: xs ->
+      let s = visit_binders s binds in
+      loop_root s xs
+    | Ast.RExpr e :: xs ->
+      let s = visit_expr s e in
+      loop_root s xs
+    | Ast.RData _ :: xs -> loop_root s xs
+  and visit_binders s = function
+    | [] -> s
+    | Ast.BAnnot _ :: xs -> visit_binders s xs
+    | Ast.BValue (_, _, e) :: xs ->
+      let s = visit_expr s e in
+      visit_binders s xs
+  and visit_expr s = function
+    | Ast.EModVar (mname, _) ->
+      S.add mname s
+    | Ast.ESeq (x, xs) | Ast.EApp (x, xs) ->
+      List.fold_left visit_expr s (x :: xs)
+    | Ast.ETup xs | Ast.ECons (_, _, xs) ->
+      List.fold_left visit_expr s xs
+    | Ast.ERef x | Ast.ELam (_, x) | Ast.ETyped (x, _) | Ast.EDeref x ->
+      visit_expr s x
+    | Ast.ELamCase xs ->
+      List.fold_left (fun s (_, e) -> visit_expr s e) s xs
+    | Ast.ECase (x, xs) ->
+      let s = visit_expr s x in
+      List.fold_left (fun s (_, e) -> visit_expr s e) s xs
+    | Ast.ELet (b, e) | Ast.ERec (b, e) ->
+      let s = visit_binders s b in
+      visit_expr s e
+    | Ast.EAssign (p, q) ->
+      let s = visit_expr s p in
+      visit_expr s q
+    | Ast.EVar _ -> s in
+  loop_root S.empty root
 
 type ('a, 'b) ventry =
   | Ctor of 'a
@@ -13,6 +59,8 @@ type typescheme_t = Type.RSet.t * Type.t
 type ctorinfo_t = Type.datadef * Type.tname list * Type.t list
 type styp_t = (Type.datadef, Type.t) ventry M.t
 type sval_t = (ctorinfo_t, typescheme_t) ventry M.t
+
+type modsig_t = typescheme_t M.t
 
 let register_ctors (d : Type.datadef) s =
   Hashtbl.fold (fun k (_, extn, args) s ->
@@ -58,6 +106,7 @@ type state =
   { venv : sval_t
   ; tenv : styp_t
   ; level : Type.level
+  ; mlook : string -> modsig_t
   }
 
 let rec check_texpr allow_fresh s = function
@@ -186,10 +235,11 @@ let rec check_pat t binds s = function
     loop binds s (params, args)
 
 let rec is_value = function
-  | Ast.EVar _ | Ast.ELam _ | Ast.ELamCase _ -> true
+  | Ast.EVar _ | Ast.EModVar _
+  | Ast.ELam _ | Ast.ELamCase _ -> true
   | Ast.ETup xs | Ast.ECons (_, _, xs) -> List.for_all is_value xs
   | Ast.ETyped (e, _) -> is_value e
-  | ECase (e, xs) when is_value e ->
+  | Ast.ECase (e, xs) when is_value e ->
     List.for_all (fun (_, e) -> is_value e) xs
   | Ast.ELet (bs, e) | Ast.ERec (bs, e) when is_value e ->
     List.for_all (function
@@ -208,6 +258,12 @@ let rec check_expr s = function
     match M.find_opt n s.venv with
       | Some (Value (foralls, t)) -> Ok (Type.inst foralls s.level t)
       | _ -> Error ("Name " ^ n ^ " not found")
+  end
+
+  | Ast.EModVar (mname, n) -> begin
+    match mname |> s.mlook |> M.find_opt n with
+      | Some (foralls, t) -> Ok (Type.inst foralls s.level t)
+      | _ -> Error ("Name " ^ mname ^ "." ^ n ^ " not found")
   end
 
   | Ast.ECons (k, dinfo, args) -> begin
@@ -432,7 +488,7 @@ let check_data_def s b =
 
   ctors
 
-let check (exports, m) =
+let check lookup_modsig (exports, m) =
   let rec check_module s = function
     | [] ->
       let rec loop m = function
@@ -441,7 +497,7 @@ let check (exports, m) =
           match M.find_opt x s.venv with
             | Some (Value (_, t)) when Type.has_free_tv t ->
               Error "Cannot export binder with free type variable"
-            | Some (Value (_, t)) -> loop (M.add x t m) xs
+            | Some (Value scheme) -> loop (M.add x scheme m) xs
             | _ -> Error ("Cannot export inexistent binder " ^ x) in
       loop M.empty exports
     | Ast.RExpr e :: xs ->
@@ -465,11 +521,17 @@ let check (exports, m) =
 
   let venv = register_ctors Type.datadef_List M.empty in
   let tenv = M.singleton "[]" (Ctor Type.datadef_List) in
-  check_module { tenv; venv; level = Type.null_level } m
+  let s = { tenv; venv; mlook = lookup_modsig; level = Type.null_level } in
+  check_module s m
 
 let rec lower_funk e id s h k =
   match e with
     | Ast.EVar n -> k id (M.find n s)
+
+    | Ast.EModVar (mname, n) ->
+      let id, name = id + 1, id in
+      let id, tail = k id name in
+      (id, LetExtn (name, mname, n, ref tail))
 
     | Ast.ETyped (e, _) -> lower_funk e id s h k
 

@@ -112,6 +112,10 @@ let rec rewrite s r = match !r with
     let (q, fv) = rewrite s next in
     (q, fv |> S.remove v |> S.add t)
 
+  | LetExtn (v, _, _, next) ->
+    let (q, fv) = rewrite s next in
+    (q, S.remove v fv)
+
   | LetCont (bs, next) ->
     let (q, fv) = rewrite s next in
     List.fold_left (fun (q, fv) (_, args, next) ->

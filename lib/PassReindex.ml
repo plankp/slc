@@ -89,6 +89,12 @@ let rec reindex' r sv sk id = match !r with
     r := Mutate (M.find tuple sv, i, M.find v sv, M.find k sk);
     id
 
+  | LetExtn (v, mname, name, e) ->
+    let v, id, sv = id, id + 1, M.add v id sv in
+
+    r := LetExtn (v, mname, name, e);
+    reindex' e sv sk id
+
 let reindex = function
   | Module (_, h, r) ->
     let old_h = !h in

@@ -62,6 +62,12 @@ let rec transform s r = match !r with
       r := !next; s
     end
 
+  | LetExtn (v, _, _, next) ->
+    let s = transform s next in
+    if not (S.mem v s) then
+      r := !next;
+    s
+
   | LetRec (bs, next) ->
     let (defs, fvs) = List.fold_left (fun (defs, xs) info ->
       let (f, _, _, _, next) = info in

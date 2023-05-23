@@ -12,6 +12,7 @@ open Ast
 %token LET REC SET IN AND
 %token CASE IGNORE BIND
 %token COLON
+%token DOT
 %token EXPORT
 %token <string> LNAME UNAME
 %token EOF
@@ -158,6 +159,7 @@ expr_atom:
   }
   | n = UNAME { ECons (n, ref Type.datadef_Void, []) }
   | e = LNAME { EVar e }
+  | m = UNAME DOT n = LNAME { EModVar (m, n) }
   | e = expr_atom LD { EDeref e }
 
 exprs:

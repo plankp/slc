@@ -120,6 +120,10 @@ let rec cc r id =
       let (id, esc) = cc e id in
       (id, esc |> S.remove v |> S.add t)
 
+    | LetExtn (v, _, _, e) ->
+      let (id, esc) = cc e id in
+      (id, S.remove v esc)
+
     | Case (v, _) ->
       (id, S.singleton v)
 

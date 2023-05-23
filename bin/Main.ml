@@ -1,4 +1,5 @@
 open Slc
+open Printf
 
 module M = Map.Make (String)
 
@@ -53,7 +54,7 @@ let transform_program mname prog =
       print_endline ""
     end) transforms;
 
-  let prog = PassEmit.lower prog in
+  let prog = PassEmit.lower mname prog in
 
   if !dump_lir then begin
     print_endline "Lower to LIR";
@@ -61,10 +62,7 @@ let transform_program mname prog =
   end;
 
   let chan = Out_channel.open_text (mname ^ ".s") in
-  let is_entry = match !entry_module with
-    | Some name when name = mname -> true
-    | _ -> false in
-  PassLower.lower ~is_entry chan prog;
+  PassLower.lower chan prog;
   Out_channel.close_noerr chan
 
 let get_module_name fname =
@@ -84,13 +82,41 @@ let get_module_name fname =
       | _ -> None
   with _ -> None
 
+let stop_after f =
+  f ();
+  exit 0
+
+type source_module =
+  { name : string
+  ; mutable prog : Ast.prog option
+  ; mutable defn : Sem.modsig_t option
+  }
+
 let () =
   Arg.parse speclist anon_fun usage_msg;
 
-  let modules = List.map (fun filename ->
+  let input_files =
+    let v = !input_files in
+    input_files := [];  (* garbage collection hint? *)
+    v in
+
+  let g = Hashtbl.create 32 in
+  let fetch_module_map name =
+    match Hashtbl.find_opt g name with
+      | Some v -> v
+      | None ->
+        let m = { name; prog = None; defn = None } in
+        let v = Tarjan.new_vertex m in
+        Hashtbl.add g name v;
+        v in
+
+  (* parse + construct dependency graph (of the modules) *)
+
+  List.iter (fun filename ->
     match get_module_name filename with
       | None ->
-        failwith ("File name is not resolve in a valid module name: " ^ filename)
+        stop_after (fun () ->
+          printf "File name does not begin with a valid module name: %s\n" filename)
       | Some mname ->
         let chan = In_channel.open_text filename in
         let lbuf = Lexing.from_channel chan in
@@ -98,30 +124,102 @@ let () =
 
         let result = Driver.parse Parser.Incremental.prog lbuf in
         In_channel.close_noerr chan;
-        (mname, result)) !input_files in
+        match result with
+          | Error e ->
+            stop_after (fun () ->
+              printf "Error in module %s:\n%s\n" mname e)
+          | Ok m ->
+            let node = fetch_module_map mname in
+            let info = Tarjan.get_info node in
+            if info.prog <> None then
+              stop_after (fun () ->
+                printf "Module %s appears in the list of files multiple times\n" mname);
+            info.prog <- Some m;
+            let deps = Sem.resolve_module_deps m in
+            if Sem.S.mem mname deps then
+              stop_after (fun () ->
+                printf "Error in module %s:\nIt explicitly references itself and it shouldn't\n" mname);
+            Sem.S.iter (fun dep ->
+              let needs = fetch_module_map dep in
+              Tarjan.add_edge node needs) deps) input_files;
 
-  let modules = List.map (fun (mname, m) ->
-    (mname, Result.bind m (fun m ->
-      try
-        Result.bind (Sem.check m) (fun export ->
-          Result.bind (Sem.lower m) (fun m ->
-            Ok (m, export)))
-      with Failure e -> Error e))) modules in
+  (* a module node may either be:
+   * -  explicitly present (as all file names listed should)
+   * -  implicitly present (say library Option is used by input file Foo.sl)
+   *)
 
-  let (modules, errored) = List.fold_left (fun (map, flag) (mname, m) ->
+  let () = match !entry_module with
+    | None -> ()
+    | Some m ->
+      let fail () =
+        stop_after (fun () ->
+          printf "Entry module %s is not (explicitly) present during compilation\n" m) in
+      let node = Hashtbl.find_opt g m in
+      match node with
+        | None -> fail ()
+        | Some node ->
+          let info = Tarjan.get_info node in
+          if info.prog = None then fail ()
+          else
+            (* being the entry means to be initialized last (and no one
+             * depends on it). we represent this by adding dependence edges to
+             * every other module *)
+            Hashtbl.iter (fun _ other ->
+              if other != node then
+                Tarjan.add_edge node other) g in
+
+  let scc = g |> Hashtbl.to_seq_values |> Tarjan.compute_scc in
+  let scc = List.fold_left (function
+    | x :: (_ :: _ as xs) ->
+      (* we must have some sort of circular dependency *)
+      stop_after (fun () ->
+        printf "Error in module %s\n" (Tarjan.get_info x).name;
+        printf "It forms a circular dependency with %d other module(s)\n" (List.length xs))
+    | [x] -> fun xs -> x :: xs
+    | [] -> fun x -> x) [] scc in
+  let scc = List.rev scc in
+
+  (* compute the module signature in dependency graph order *)
+  let lookup_modsig name =
+    let m = Hashtbl.find g name in
+    let m = Tarjan.get_info m in
+    Option.get m.defn in
+
+  List.iter (fun node ->
+    let info = Tarjan.get_info node in
+    match info.prog with
+      | None ->
+        (* TODO: obtain the signature of a precompiled module *)
+        failwith "TODO: Support precompiled modules"
+      | Some m ->
+        match Sem.check lookup_modsig m with
+          | exception Failure e | Error e ->
+            stop_after (fun () ->
+              printf "Error in module %s\n%s\n" info.name e)
+          | Ok exports ->
+            info.defn <- Some exports) scc;
+
+  let scc = List.map (fun node ->
+    let info = Tarjan.get_info node in
+    match info.prog with
+      | None -> (info.name, None)
+      | Some m ->
+        match Sem.lower m with
+          | exception Failure e | Error e ->
+            stop_after (fun () ->
+              printf "Error in module %s\n%s\n" info.name e)
+          | Ok m -> (info.name, Some m)) scc in
+
+  List.iter (fun (mname, m) ->
     match m with
-      | Error e ->
-        Printf.printf "Error in module %s:\n" mname;
-        Printf.printf "%s\n" e;
-        (M.empty, true)
-      | Ok (m, export) ->
-        (M.add mname (m, export) map, flag)) (M.empty, false) modules in
+      | None -> ()
+      | Some m -> transform_program mname m) scc;
 
-  if not errored then begin
-    match !entry_module with
-      | Some v when not (M.mem v modules) ->
-        Printf.printf "Entry module %s is not present\n" v
-      | _ ->
-        M.iter (fun mname (m, _) ->
-          transform_program mname m) modules
+  if !entry_module <> None then begin
+    let chan = Out_channel.open_text ("_driver.s") in
+    PassLower.emit_driver chan (scc
+      |> List.to_seq
+      |> Seq.map (fun (n, _) ->
+        PassEmit.mangle_globl_name n "INIT"));
+    Out_channel.close_noerr chan
   end

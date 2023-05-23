@@ -7,6 +7,7 @@ val reset_edges : 'a vertex -> unit
 val has_edge : 'a vertex -> 'a vertex -> bool
 val get_edges : 'a vertex -> 'a vertex list
 
+val update_info : 'a vertex -> ('a -> 'a) -> unit
 val set_info : 'a vertex -> 'a -> unit
 val get_info : 'a vertex -> 'a
 

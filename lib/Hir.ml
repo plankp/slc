@@ -16,6 +16,7 @@ type term =
   | LetProj of valuevar * int * valuevar * term ref
   | Case of valuevar * contvar M.t
   | Mutate of valuevar * int * valuevar * contvar
+  | LetExtn of valuevar * string * string * term ref
 
 and contvar =
   int
@@ -145,6 +146,11 @@ let rec dump' (n : int) (t : term) : unit =
     | Mutate (tuple, i, v, k) ->
       dump_prefix ();
       Printf.printf "Mutate %%v%d %d <- %%v%d, %%k%d" tuple i v k
+
+    | LetExtn (v, mname, name, e) ->
+      dump_prefix ();
+      Printf.printf "let %%v%d = external %s.%s in\n" v mname name;
+      dump' n !e
 
 let dump t =
   dump' 0 t

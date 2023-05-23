@@ -4,20 +4,29 @@ open Printf
 
 module M = Map.Make (Int)
 
-let rec lower_value id prog sv sk contk conth = function
+let mangle_globl_name mname n =
+  sprintf "slmod_%s_%s" mname n
+
+let rec lower_value id prog mname sv sk contk conth = function
+  | LetExtn (v, extn, n, e) ->
+    let id, t1 = Z.succ id, Z.to_string id in
+    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
+    let name = mangle_globl_name extn n in
+    (id, prog, m, ILoad (t1, Globl name) :: instrs, tail)
+
   | LetPack (v, [], e) ->
-    lower_value id prog (M.add v (Int64 0L) sv) sk contk conth !e
+    lower_value id prog mname (M.add v (Int64 0L) sv) sk contk conth !e
 
   | LetPack (v, elts, e) ->
     let id, t1 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog (M.add v (Local t1) sv) sk contk conth !e in
+    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
     let elts = List.map (fun (_, e) -> M.find e sv) elts in
     (id, prog, m, IPack (t1, elts) :: instrs, tail)
 
   | LetProj (v, i, t, e) ->
     let id, t1 = Z.succ id, Z.to_string id in
     let id, t2 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog (M.add v (Local t2) sv) sk contk conth !e in
+    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t2) sv) sk contk conth !e in
     let instrs = IOffs (t1, M.find t sv, Int64.of_int i)
       :: ILoad (t2, Local (t1))
       :: instrs in
@@ -25,14 +34,15 @@ let rec lower_value id prog sv sk contk conth = function
 
   | LetCons (v, i, elts, e) ->
     let id, t1 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog (M.add v (Local t1) sv) sk contk conth !e in
+    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
     let elts = List.map (fun e -> M.find e sv) elts in
     let elts = Int64 (Int64.of_int i) :: elts in
     (id, prog, m, IPack (t1, elts) :: instrs, tail)
 
   | Export xs ->
     let instrs = List.fold_left (fun buf (n, v) ->
-      IStore (M.find v sv, Globl (sprintf "G_%s" n)) :: buf) [] xs in
+      let name = mangle_globl_name mname n in
+      IStore (M.find v sv, Globl name) :: buf) [] xs in
     (id, prog, Lir.M.empty, instrs, KRetv (Tuple []))
 
   | Mutate (mem, i, elt, k) ->
@@ -73,13 +83,13 @@ let rec lower_value id prog sv sk contk conth = function
     let sk = List.fold_left (fun sk (k, args, _) ->
       M.add k (List.length args) sk) sk bs in
 
-    let (id, prog, m, instrs, tail) = lower_value id prog sv sk contk conth !e in
+    let (id, prog, m, instrs, tail) = lower_value id prog mname sv sk contk conth !e in
     let (id, prog, m) = List.fold_left (fun (id, prog, m) (k, args, e) ->
       let k = string_of_int k in
       let (id, sv, args) = List.fold_left (fun (id, sv, acc) arg ->
         let id, n = Z.succ id, Z.to_string id in
         (id, M.add arg (Local n) sv, n :: acc)) (id, sv, []) args in
-      let (id, prog, m', instrs, tail) = lower_value id prog sv sk contk conth !e in
+      let (id, prog, m', instrs, tail) = lower_value id prog mname sv sk contk conth !e in
       let block = (List.rev args, instrs, tail) in
       let m = Lir.M.fold Lir.M.add m' m in
       (id, prog, Lir.M.add k block m)) (id, prog, m) bs in
@@ -87,8 +97,8 @@ let rec lower_value id prog sv sk contk conth = function
 
   | LetFun ((f, args, k', h', body), e) ->
     let id, t1 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog (M.add f (Globl t1) sv) sk contk conth !e in
-    let (id, prog) = lower_function id prog t1 args (Some k') (Some h') body in
+    let (id, name, prog) = lower_function id prog mname t1 args (Some k') (Some h') body in
+    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add f (Globl name) sv) sk contk conth !e in
     (id, prog, m, instrs, tail)
 
   | Case (v, cases) ->
@@ -144,23 +154,25 @@ let rec lower_value id prog sv sk contk conth = function
 
   | _ -> failwith "Unsupported lowering"
 
-and lower_function id prog f args k h e =
+and lower_function id prog mname f args k h e =
   let (id, sv, args) = List.fold_left (fun (id, sv, acc) arg ->
     let id, n = Z.succ id, Z.to_string id in
     (id, M.add arg (Local n) sv, n :: acc)) (id, M.empty, []) args in
-  let (id, prog, m, instrs, tail) = lower_value id prog sv M.empty k h !e in
+  let (id, prog, m, instrs, tail) = lower_value id prog mname sv M.empty k h !e in
   let m = Lir.M.add "entry" ([], instrs, tail) m in
   let n = Z.to_string id in
   let m = Lir.M.add "exit" ([n], [], KRetv (Local n)) m in
   let m = Lir.M.add "dead" ([], [], KDead) m in
-  (id, Lir.M.add f (Label (List.rev args, "entry", m)) prog)
+  let name = mangle_globl_name mname f in
+  (id, name, Lir.M.add name (Label (List.rev args, "entry", m)) prog)
 
-let lower e =
+let lower mname e =
   let _ = PassReindex.reindex e in
   match e with
     | Module (v, h, m) ->
-      let (_, prog) = lower_function Z.zero Lir.M.empty "INIT" [] None (Some !h) m in
+      let (_, _, prog) = lower_function Z.zero Lir.M.empty mname "INIT" [] None (Some !h) m in
       let prog = List.fold_left (fun prog v ->
-        Lir.M.add (sprintf "G_%s" v) (Int64 0L) prog) prog v in
+        let name = mangle_globl_name mname v in
+        Lir.M.add name (Int64 0L) prog) prog v in
       prog
     | _ -> failwith "INVALID TERM ANCHOR"

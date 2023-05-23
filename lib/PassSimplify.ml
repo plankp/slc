@@ -66,6 +66,12 @@ let rec collect_occ s r = match !r with
       r := !next; s
     end
 
+  | LetExtn (v, _, _, next) ->
+    let s = collect_occ s next in
+    if not (M.mem v s) then
+      r := !next;
+    s
+
   | LetFun ((f, _, _, _, body), next) ->
     let s = collect_occ s next in
     if M.mem f s then
@@ -157,6 +163,9 @@ let rec inline_single_use occs sbody svar r = match !r with
 
   | LetProj (v, i, t, next) ->
     r := LetProj (v, i, subst svar t, next);
+    inline_single_use occs sbody svar next
+
+  | LetExtn (_, _, _, next) ->
     inline_single_use occs sbody svar next
 
   | LetFun ((_, _, _, _, body), next) ->
@@ -266,6 +275,9 @@ let rec redux env r = match !r with
     let elts = List.map (fun (n, v) -> (n, subst env v)) elts in
     r := LetPack (v, elts, next);
 
+    redux (M.add v (Term !r) env) next
+
+  | LetExtn (v, _, _, next) ->
     redux (M.add v (Term !r) env) next
 
   | LetFun ((_, _, _, _, body), next) ->

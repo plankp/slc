@@ -26,6 +26,9 @@ let get_info { info; _ } = info
 let set_info n v =
   n.info <- v
 
+let update_info n f =
+  n.info <- f n.info
+
 let reset_state node =
   node.index <- None;
   node.lowlink <- ~-1;

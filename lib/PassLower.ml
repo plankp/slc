@@ -32,7 +32,7 @@ let rec map_module_value chan : value -> unit = function
   | Local _ -> failwith "Module level value cannot reference a local value"
   | Label _ -> failwith "Cannot map a label without a Globl name"
   | Globl n ->
-    fprintf chan "    .quad _module_%s\n" n
+    fprintf chan "    .quad _%s\n" n
   | Int64 v ->
     fprintf chan "    .quad %Lu\n" v
   | Flt64 v ->
@@ -94,7 +94,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
     | Local v ->
       fprintf chan "    movq %d(%%rbp), %s  # $%s\n" (M.find v m) reg v
     | Globl v ->
-      fprintf chan "    leaq _module_%s(%%rip), %s\n" v reg
+      fprintf chan "    leaq _%s(%%rip), %s\n" v reg
     | Int64 v ->
       fprintf chan "    movq $%Lu, %s\n" v reg
     | Flt64 v ->
@@ -119,7 +119,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
           fprintf chan "    pushq %%rax\n") in
       let () = match f with
         | Globl f ->
-          fprintf chan "    callq _module_%s\n" f;
+          fprintf chan "    callq _%s\n" f;
         | _ ->
           load_simple_value "%rax" f;
           fprintf chan "    jmpq *%%rax\n" in
@@ -143,7 +143,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
         fprintf chan "    movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
       | ILoad (dst, Globl sym) ->
-        fprintf chan "    movq _module_%s(%%rip), %%rax\n" sym;
+        fprintf chan "    movq _%s(%%rip), %%rax\n" sym;
         fprintf chan "    movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
       | ILoad (dst, addr) ->
@@ -153,7 +153,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
 
       | IStore (v, Globl sym) ->
         load_simple_value "%rax" v;
-        fprintf chan "    movq %%rax, _module_%s(%%rip)\n" sym
+        fprintf chan "    movq %%rax, _%s(%%rip)\n" sym
 
       | IStore (v, addr) ->
         load_simple_value "%rax" addr;
@@ -189,7 +189,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
         load_simple_value "%rax" v;
         List.iter (fun (v, k) ->
           fprintf chan "    cmpq $%Lu, %%rax\n" v;
-          fprintf chan "    je .L%s_%s" prefix k) cases;
+          fprintf chan "    je .L%s_%s\n" prefix k) cases;
         fprintf chan "    jmp .L%s_%s\n" prefix k
 
       | KCatch (f, k, h, args) ->
@@ -304,7 +304,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
             loop len 8 in
         match f with
           | Globl f ->
-            fprintf chan "    jmp _module_%s\n" f;
+            fprintf chan "    jmp _%s\n" f;
           | _ ->
             load_simple_value "%rax" f;
             fprintf chan "    jmpq *%%rax\n"
@@ -315,28 +315,30 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
   M.iter map_block m1;
   M.iter map_block m2
 
-let lower ~is_entry chan e =
+let lower chan e =
   M.iter (fun n -> function
     | Label lbl ->
       fprintf chan "    .text\n";
-      fprintf chan "    .global _module_%s\n" n;
-      fprintf chan "_module_%s:\n" n;
+      fprintf chan "    .global _%s\n" n;
+      fprintf chan "_%s:\n" n;
       map_module_label chan n lbl
     | v ->
       fprintf chan "    .data\n";
-      fprintf chan "    .global _module_%s\n" n;
-      fprintf chan "_module_%s:\n" n;
-      map_module_value chan v) e;
+      fprintf chan "    .global _%s\n" n;
+      fprintf chan "_%s:\n" n;
+      map_module_value chan v) e
 
-  if is_entry then begin
-    fprintf chan "    .text\n";
-    fprintf chan "    .globl _main\n";
-    fprintf chan "_main:\n";
-    fprintf chan "    pushq %%rbp\n";
-    fprintf chan "    movq %%rsp, %%rbp\n";
-    fprintf chan "    callq _GC_init\n";
-    fprintf chan "    callq _module_INIT\n";
-    fprintf chan "    movl %%edx, %%eax\n";
-    fprintf chan "    leaveq\n";
-    fprintf chan "    retq\n"
-  end
+let emit_driver chan ordering =
+  fprintf chan "    .text\n";
+  fprintf chan "    .globl _main\n";
+  fprintf chan "_main:\n";
+  fprintf chan "    pushq %%rbp\n";
+  fprintf chan "    movq %%rsp, %%rbp\n";
+  fprintf chan "    callq _GC_init\n";
+  Seq.iter (fun name ->
+    fprintf chan "    callq _%s\n" name;
+    fprintf chan "    testl %%edx, %%edx\n";
+    fprintf chan "    jnz 0f\n") ordering;
+  fprintf chan "0:  movl %%edx, %%eax\n";
+  fprintf chan "    leaveq\n";
+  fprintf chan "    retq\n"
