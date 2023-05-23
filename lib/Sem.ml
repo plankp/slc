@@ -105,6 +105,7 @@ let ( let< ) = Result.bind
 type state =
   { venv : sval_t
   ; tenv : styp_t
+  ; datas : Type.datadef list
   ; level : Type.level
   ; mlook : string -> modsig_t
   }
@@ -151,7 +152,7 @@ let rec check_texpr allow_fresh s = function
 
 let lookup_data_ctor t s k =
   match Type.unwrap_shallow t with
-    | TyDat (d, targs) -> begin
+    | TyDat (d, targs) when d.visible -> begin
       match Hashtbl.find_opt d.cases k with
         | None -> Error ("Unrecognized data constructor " ^ k)
         | Some (_, extn, params) ->
@@ -452,7 +453,8 @@ let check_data_def s b =
       (Z.succ v, (info, variance) :: xs, m)) (Z.zero, [], M.empty) targs in
 
     let cases = Hashtbl.create 16 in
-    let self : Type.datadef = { name; cases; args = List.rev targs } in
+    let self : Type.datadef =
+      { name; cases; visible = true; args = List.rev targs } in
     if Hashtbl.mem m name then
       failwith "Illegal duplicate data name in same block";
     Hashtbl.add m name (cases, env);
@@ -490,6 +492,10 @@ let check_data_def s b =
 let check lookup_modsig (exports, m) =
   let rec check_module s = function
     | [] ->
+      (* assume none of the data constructors we've defined are exported:
+       * mark them as not visible *)
+      List.iter (fun v -> v.Type.visible <- false) s.datas;
+
       let rec loop m = function
         | [] -> Ok m
         | x :: xs ->
@@ -513,14 +519,18 @@ let check lookup_modsig (exports, m) =
         let ctors = check_data_def s b in
         let s = List.fold_left (fun s ctor ->
           { s with venv = register_ctors ctor s.venv
-                 ; tenv = M.add ctor.name (Ctor ctor) s.tenv }) s ctors in
+                 ; tenv = M.add ctor.name (Ctor ctor) s.tenv
+                 ; datas = ctor :: s.datas }) s ctors in
         check_module s xs
       with Failure e -> Error e
     end in
 
+  (* since the list constructor is exported, it does not go into the datas
+   * list. *)
   let venv = register_ctors Type.datadef_List M.empty in
   let tenv = M.singleton "[]" (Ctor Type.datadef_List) in
-  let s = { tenv; venv; mlook = lookup_modsig; level = Type.null_level } in
+  let s = { tenv; venv; datas = []
+          ; mlook = lookup_modsig; level = Type.null_level } in
   check_module s m
 
 let rec lower_funk e id s h k =

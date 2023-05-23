@@ -23,6 +23,7 @@ and datadef =
   { name  : string
   ; args  : (tname * variance) list
   ; cases : (string, int * tname list * t list) Hashtbl.t
+  ; mutable visible : bool
   }
 
 val datadef_Void : datadef

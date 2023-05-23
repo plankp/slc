@@ -27,10 +27,14 @@ and tyvar =
   | Link of t
 
 and datadef =
-  (* each case holds a tname list for existentials *)
+  (* each case holds a tname list for existentials.
+   * visible affects two things:
+   * -  if type-dependent case lookup is triggered
+   * -  if variance info is accounted for (e.g. value restriction) *)
   { name  : string
   ; args  : (tname * variance) list
   ; cases : (string, int * tname list * t list) Hashtbl.t
+  ; mutable visible : bool
   }
 
 (* data Void = .  <-- impossible type in surface syntax *)
@@ -38,13 +42,15 @@ let datadef_Void : datadef =
   { name = "Void"
   ; args = []
   ; cases = Hashtbl.create 0
+  ; visible = true
   }
 
 (* data List +a = [] | (::) a (List a)  <-- corresponds to [a] *)
 let datadef_List : datadef =
   let cases = Hashtbl.create 2 in
   let t0 = (Z.zero, Z.zero) in
-  let self = { name = "List"; args = [t0, Covariant]; cases } in
+  let self = { name = "List"; args = [t0, Covariant]; cases
+             ; visible = true } in
   Hashtbl.add cases "[]" (0, [], []);
   Hashtbl.add cases "::" (1, [], [TyPly t0; (TyDat (self, [TyPly t0]))]);
   self
@@ -184,9 +190,9 @@ let check_datadef_variance (decl : datadef) : unit =
       walk ctx r
     | TyTup xs ->
       List.iter (walk ctx) xs
-    | TyDat ({ args; _ }, xs) ->
+    | TyDat ({ args; visible; _ }, xs) ->
       List.iter2 (fun (_, v) ->
-        walk (enter_variance ctx v)) args xs in
+        walk (if visible then enter_variance ctx v else Invariant)) args xs in
 
   List.iter (fun (n, v) -> Hashtbl.add m n v) decl.args;
   Hashtbl.iter (fun _ (_, _, sites) ->
@@ -206,9 +212,9 @@ let rec drop_dangerous_level' (l2 : level) (dangerous : bool) : t -> unit = func
     drop_dangerous_level' l2 dangerous q
   | TyTup xs ->
     List.iter (drop_dangerous_level' l2 dangerous) xs
-  | TyDat ({ args; _ }, xs) ->
+  | TyDat ({ args; visible; _ }, xs) ->
     List.iter2 (function
-      | (_, Covariant) -> drop_dangerous_level' l2 dangerous
+      | (_, Covariant) when visible -> drop_dangerous_level' l2 dangerous
       | _ -> drop_dangerous_level' l2 true) args xs
 
 let drop_dangerous_level (l2 : level) (t : t) : unit =
