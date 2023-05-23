@@ -1,5 +1,9 @@
 type prog =
-  string list * root list
+  ename list * root list
+
+and ename =
+  | GVar of string
+  | GData of string
 
 and root =
   | RLet of binder list
@@ -15,7 +19,7 @@ and expr =
   | EVar of string option * string
   | ETup of expr list
   | ERef of expr
-  | ECons of string * Type.datadef ref * expr list
+  | ECons of string option * string * Type.datadef ref * expr list
   | EApp of expr * expr list
   | ELam of pat list * expr
   | ELamCase of (pat * expr) list
@@ -35,12 +39,12 @@ and pat =
   | PVar of string * pat
   | PTup of pat list
   | PDeref of pat
-  | PDecons of string * Type.datadef ref * pat list
+  | PDecons of string option * string * Type.datadef ref * pat list
   | PTyped of pat * texpr
 
 and texpr =
   | TEVar of string
   | TETup of texpr list
   | TERef of texpr
-  | TECons of string * texpr list
+  | TECons of string option * string * texpr list
   | TEArr of texpr * texpr

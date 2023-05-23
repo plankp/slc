@@ -21,27 +21,57 @@ let resolve_module_deps (_, root) =
     | Ast.RExpr e :: xs ->
       let s = visit_expr s e in
       loop_root s xs
-    | Ast.RData _ :: xs -> loop_root s xs
+    | Ast.RData ds :: xs ->
+      let s = List.fold_left (fun s (_, _, ys) ->
+        List.fold_left (fun s (_, ts) ->
+          List.fold_left visit_type s ts) s ys) s ds in
+      loop_root s xs
   and visit_binders s = function
     | [] -> s
-    | Ast.BAnnot _ :: xs -> visit_binders s xs
-    | Ast.BValue (_, _, e) :: xs ->
-      let s = visit_expr s e in
-      visit_binders s xs
+    | Ast.BAnnot (_, t) :: xs ->
+      visit_binders (visit_type s t) xs
+    | Ast.BValue (_, ps, e) :: xs ->
+      let s = List.fold_left visit_pat s ps in
+      visit_binders (visit_expr s e) xs
+  and visit_type s = function
+    | Ast.TECons (Some mname, _, xs) ->
+      List.fold_left visit_type (S.add mname s) xs
+    | Ast.TECons (None, _, xs)
+    | Ast.TETup xs -> List.fold_left visit_type s xs
+    | Ast.TERef x -> visit_type s x
+    | Ast.TEArr (p, q) -> (visit_type (visit_type s p) q)
+    | Ast.TEVar _ -> s
+  and visit_pat s = function
+    | Ast.PIgn -> s
+    | Ast.PVar (_, p) | Ast.PDeref p -> visit_pat s p
+    | Ast.PDecons (Some mname, _, _, xs) ->
+      List.fold_left visit_pat (S.add mname s) xs
+    | Ast.PDecons (_, _, _, xs)
+    | Ast.PTup xs -> List.fold_left visit_pat s xs
+    | Ast.PTyped (p, t) -> visit_pat (visit_type s t) p
   and visit_expr s = function
     | Ast.EVar (Some mname, _) ->
       S.add mname s
     | Ast.ESeq (x, xs) | Ast.EApp (x, xs) ->
       List.fold_left visit_expr s (x :: xs)
-    | Ast.ETup xs | Ast.ECons (_, _, xs) ->
+    | Ast.ECons (Some mname, _, _, xs) ->
+      List.fold_left visit_expr (S.add mname s) xs
+    | Ast.ETup xs | Ast.ECons (_, _, _, xs) ->
       List.fold_left visit_expr s xs
-    | Ast.ERef x | Ast.ELam (_, x) | Ast.ETyped (x, _) | Ast.EDeref x ->
+    | Ast.ERef x | Ast.EDeref x ->
+      visit_expr s x
+    | Ast.ETyped (x, t) ->
+      visit_expr (visit_type s t) x
+    | Ast.ELam (ps, x) ->
+      let s = List.fold_left visit_pat s ps in
       visit_expr s x
     | Ast.ELamCase xs ->
-      List.fold_left (fun s (_, e) -> visit_expr s e) s xs
+      List.fold_left (fun s (p, e) ->
+        visit_expr (visit_pat s p) e) s xs
     | Ast.ECase (x, xs) ->
       let s = visit_expr s x in
-      List.fold_left (fun s (_, e) -> visit_expr s e) s xs
+      List.fold_left (fun s (p, e) ->
+        visit_expr (visit_pat s p) e) s xs
     | Ast.ELet (b, e) | Ast.ERec (b, e) ->
       let s = visit_binders s b in
       visit_expr s e
@@ -60,7 +90,7 @@ type ctorinfo_t = Type.datadef * Type.tname list * Type.t list
 type styp_t = (Type.datadef, Type.t) ventry M.t
 type sval_t = (ctorinfo_t, typescheme_t) ventry M.t
 
-type modsig_t = typescheme_t M.t
+type modsig_t = styp_t * sval_t
 
 let register_ctors (d : Type.datadef) s =
   Hashtbl.fold (fun k (_, extn, args) s ->
@@ -137,9 +167,12 @@ let rec check_texpr allow_fresh s = function
         loop s (x :: acc) xs in
     loop s [] elts
 
-  | Ast.TECons (k, args) ->
-    match M.find_opt k s.tenv with
-      | Some (Ctor info) ->
+  | Ast.TECons (minfo, k, args) ->
+    let env = match minfo with
+      | Some name -> name |> s.mlook |> fst
+      | None -> s.tenv in
+    match M.find_opt k env, minfo with
+      | Some (Ctor info), _ ->
         let rec loop s acc = function
           | [], [] -> Ok (s, Type.TyDat (info, List.rev acc))
           | x :: xs, _ :: ys ->
@@ -148,9 +181,12 @@ let rec check_texpr allow_fresh s = function
           | _ -> Error "Type constructor argument length mismatch" in
         loop s [] (args, info.args)
 
-      | _ -> Error ("Type constructor " ^ k ^ " not found")
+      | _, Some name ->
+        Error ("Type constructor " ^ name ^ "." ^ k ^ " not found")
+      | _, None ->
+        Error ("Type constructor " ^ k ^ " not found")
 
-let lookup_data_ctor t s k =
+let lookup_data_ctor t s minfo k =
   match Type.unwrap_shallow t with
     | TyDat (d, targs) when d.visible -> begin
       match Hashtbl.find_opt d.cases k with
@@ -161,14 +197,20 @@ let lookup_data_ctor t s k =
           Ok (d, extn, params, penv)
     end
     | _ ->
-      match M.find_opt k s.venv with
-        | Some (Ctor (d, extn, params)) ->
+      let env = match minfo with
+        | Some name -> name |> s.mlook |> snd
+        | None -> s.venv in
+      match M.find_opt k env, minfo with
+        | Some (Ctor (d, extn, params)), _ ->
           let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
             let t = Type.new_tyvar s.level in
             (t :: xs, Type.RMap.add p t penv)) d.args ([], Type.RMap.empty) in
           Type.unify t (Type.TyDat (d, targs));
           Ok (d, extn, params, penv)
-        | _ -> Error ("Unrecognized data constructor " ^ k)
+        | _, Some name ->
+          Error ("Unrecognized data constructor " ^ name ^ "." ^ k)
+        | _, None ->
+          Error ("Unrecognized data constructor " ^ k)
 
 let rec check_pat t binds s = function
   | Ast.PIgn -> Ok (binds, s)
@@ -205,8 +247,8 @@ let rec check_pat t binds s = function
         fill_tyvars ((x, t) :: acc) xs in
     fill_tyvars [] xs
 
-  | Ast.PDecons (k, dinfo, args) ->
-    let< (d, extn, params, penv) = lookup_data_ctor t s k in
+  | Ast.PDecons (minfo, k, dinfo, args) ->
+    let< (d, extn, params, penv) = lookup_data_ctor t s minfo k in
 
     (* unlike constructing data terms, which map existentials to fresh
      * unification type variables, we map them to fresh rigid type variables.
@@ -237,7 +279,7 @@ let rec check_pat t binds s = function
 
 let rec is_value = function
   | Ast.EVar _ | Ast.ELam _ | Ast.ELamCase _ -> true
-  | Ast.ETup xs | Ast.ECons (_, _, xs) -> List.for_all is_value xs
+  | Ast.ETup xs | Ast.ECons (_, _, _, xs) -> List.for_all is_value xs
   | Ast.ETyped (e, _) -> is_value e
   | Ast.ECase (e, xs) when is_value e ->
     List.for_all (fun (_, e) -> is_value e) xs
@@ -254,45 +296,37 @@ let is_value_binder_rhs = function
   | _ -> true
 
 let rec check_expr s = function
-  | Ast.EVar (None, n) -> begin
-    match M.find_opt n s.venv with
-      | Some (Value (foralls, t)) -> Ok (Type.inst foralls s.level t)
-      | _ -> Error ("Name " ^ n ^ " not found")
+  | Ast.EVar (minfo, n) -> begin
+    let env = match minfo with
+      | Some name -> name |> s.mlook |> snd
+      | None -> s.venv in
+    match M.find_opt n env, minfo with
+      | Some (Value (foralls, t)), _ -> Ok (Type.inst foralls s.level t)
+      | _, Some name -> Error ("Name " ^ name ^ "." ^ n ^ " not found")
+      | _, None -> Error ("Name " ^ n ^ " not found")
   end
 
-  | Ast.EVar (Some mname, n) -> begin
-    match mname |> s.mlook |> M.find_opt n with
-      | Some (foralls, t) -> Ok (Type.inst foralls s.level t)
-      | _ -> Error ("Name " ^ mname ^ "." ^ n ^ " not found")
-  end
+  | Ast.ECons (minfo, k, dinfo, args) ->
+    let t = Type.new_tyvar s.level in
+    let< (d, extn, params, penv) = lookup_data_ctor t s minfo k in
 
-  | Ast.ECons (k, dinfo, args) -> begin
-    match M.find_opt k s.venv with
-      | Some (Ctor (d, extn, params)) ->
-        let (targs, penv) = List.fold_right (fun (p, _) (xs, penv) ->
-          let t = Type.new_tyvar s.level in
-          (t :: xs, Type.RMap.add p t penv)) d.args ([], Type.RMap.empty) in
+    (* when constructing data terms, replace existentials with fresh
+     * unification type variables *)
+    let penv = List.fold_left (fun penv p ->
+      let t = Type.new_tyvar s.level in
+      Type.RMap.add p t penv) penv extn in
 
-        (* when constructing, replace existentials with fresh unification type
-         * variables *)
-        let penv = List.fold_left (fun penv p ->
-          let t = Type.new_tyvar s.level in
-          Type.RMap.add p t penv) penv extn in
-
-        let rec loop = function
-          | [], [] ->
-            dinfo := d;
-            Ok (Type.TyDat (d, targs))
-          | param :: xs, arg :: ys ->
-            let< arg = check_expr s arg in
-            let param = Type.subst penv param in
-            Type.unify arg param;
-            loop (xs, ys)
-          | _ -> Error "Data constructor argument length mismatch" in
-        loop (params, args)
-
-      | _ -> Error ("Unrecognizeed data constructor " ^ k)
-  end
+    let rec loop = function
+      | [], [] ->
+        dinfo := d;
+        Ok t
+      | param :: xs, arg :: ys ->
+        let< arg = check_expr s arg in
+        let param = Type.subst penv param in
+        Type.unify arg param;
+        loop (xs, ys)
+      | _ -> Error "Data constructor argument length mismatch" in
+    loop (params, args)
 
   | Ast.ETup xs ->
     let rec loop elts = function
@@ -496,15 +530,23 @@ let check lookup_modsig (exports, m) =
        * mark them as not visible *)
       List.iter (fun v -> v.Type.visible <- false) s.datas;
 
-      let rec loop m = function
-        | [] -> Ok m
-        | x :: xs ->
+      let rec loop (mt, mv) = function
+        | [] -> Ok (mt, mv)
+        | Ast.GVar x :: xs -> begin
           match M.find_opt x s.venv with
             | Some (Value (_, t)) when Type.has_free_tv t ->
               Error "Cannot export binder with free type variable"
-            | Some (Value scheme) -> loop (M.add x scheme m) xs
-            | _ -> Error ("Cannot export inexistent binder " ^ x) in
-      loop M.empty exports
+            | Some (Value _ as ent) -> loop (mt, M.add x ent mv) xs
+            | _ -> Error ("Cannot export inexistent binder " ^ x)
+        end
+        | Ast.GData x :: xs -> begin
+          match M.find_opt x s.tenv with
+            | Some (Ctor d as ent) ->
+              d.Type.visible <- true;
+              loop (M.add x ent mt, register_ctors d mv) xs
+            | _ -> Error ("Cannot export inexistent type " ^ x)
+        end in
+      loop (M.empty, M.empty) exports
     | Ast.RExpr e :: xs ->
       let< _ = check_expr s e in
       check_module s xs
@@ -588,7 +630,7 @@ let rec lower_funk e id s h k =
           (id, LetPack (name, List.rev acc, ref tail)) in
       loop id [] xs
 
-    | Ast.ECons (ctor, { contents = info }, args) ->
+    | Ast.ECons (_, ctor, { contents = info }, args) ->
       let rec loop id acc = function
         | x :: xs ->
           lower_funk x id s h (fun id x -> loop id (x :: acc) xs)
@@ -775,7 +817,7 @@ and lower_case v id cases h k =
                 (i + 1, LetProj (start + i, i, scrut, ref term))) (0, term) elts in
               (id, term) in
           spec id [] [] [] elts
-        | v :: vs, Ast.PDecons (_, { contents = info }, _) :: _ ->
+        | v :: vs, Ast.PDecons (_, _, { contents = info }, _) :: _ ->
           (* assume the variant type has data constructors k1 to kN, then
            * what we in essence is specialize the case over every possible
            * constructor.
@@ -788,7 +830,7 @@ and lower_case v id cases h k =
             let rec coiter pinit s = function
               | [], (Ast.PIgn :: _ as ps) ->
                 (pinit, ps, s, e)
-              | [], (Ast.PDecons (ctor, _, args) :: _ as ps) ->
+              | [], (Ast.PDecons (_, ctor, _, args) :: _ as ps) ->
                 Hashtbl.replace partitions ctor (lazy (
                   List.rev_map (fun _ -> Ast.PIgn) args));
                 (pinit, ps, s, e)
@@ -824,7 +866,7 @@ and lower_case v id cases h k =
                   Hir.M.update (Some slot) (function
                     | None -> Some (args, [row])
                     | Some (p, xs) -> Some (p, row :: xs)) m) partitions m
-              | Ast.PDecons (ctor, _, args) :: ps ->
+              | Ast.PDecons (_, ctor, _, args) :: ps ->
                 let (slot, _, _) = Hashtbl.find info.cases ctor in
                 let row = List.rev_append pinit (args @ ps), s, e in
                 Hir.M.update (Some slot) (function
@@ -871,11 +913,11 @@ let lower (exports, m) =
     | [] -> begin
       let m = Hashtbl.create 16 in
       let (list1, list2) = List.fold_left (fun (xs, ys) n ->
-        if Hashtbl.mem m n then (xs, ys)
-        else begin
-          Hashtbl.add m n ();
-          ((n, M.find n s) :: xs, n :: ys)
-        end) ([], []) exports in
+        match n with
+          | Ast.GVar n when not (Hashtbl.mem m n) ->
+            Hashtbl.add m n ();
+            ((n, M.find n s) :: xs, n :: ys)
+          | _ -> (xs, ys)) ([], []) exports in
       export_sym := list2;
       (id, Export list1)
     end
