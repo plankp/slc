@@ -29,7 +29,7 @@ let resolve_module_deps (_, root) =
       let s = visit_expr s e in
       visit_binders s xs
   and visit_expr s = function
-    | Ast.EModVar (mname, _) ->
+    | Ast.EVar (Some mname, _) ->
       S.add mname s
     | Ast.ESeq (x, xs) | Ast.EApp (x, xs) ->
       List.fold_left visit_expr s (x :: xs)
@@ -235,8 +235,7 @@ let rec check_pat t binds s = function
     loop binds s (params, args)
 
 let rec is_value = function
-  | Ast.EVar _ | Ast.EModVar _
-  | Ast.ELam _ | Ast.ELamCase _ -> true
+  | Ast.EVar _ | Ast.ELam _ | Ast.ELamCase _ -> true
   | Ast.ETup xs | Ast.ECons (_, _, xs) -> List.for_all is_value xs
   | Ast.ETyped (e, _) -> is_value e
   | Ast.ECase (e, xs) when is_value e ->
@@ -254,13 +253,13 @@ let is_value_binder_rhs = function
   | _ -> true
 
 let rec check_expr s = function
-  | Ast.EVar n -> begin
+  | Ast.EVar (None, n) -> begin
     match M.find_opt n s.venv with
       | Some (Value (foralls, t)) -> Ok (Type.inst foralls s.level t)
       | _ -> Error ("Name " ^ n ^ " not found")
   end
 
-  | Ast.EModVar (mname, n) -> begin
+  | Ast.EVar (Some mname, n) -> begin
     match mname |> s.mlook |> M.find_opt n with
       | Some (foralls, t) -> Ok (Type.inst foralls s.level t)
       | _ -> Error ("Name " ^ mname ^ "." ^ n ^ " not found")
@@ -526,9 +525,9 @@ let check lookup_modsig (exports, m) =
 
 let rec lower_funk e id s h k =
   match e with
-    | Ast.EVar n -> k id (M.find n s)
+    | Ast.EVar (None, n) -> k id (M.find n s)
 
-    | Ast.EModVar (mname, n) ->
+    | Ast.EVar (Some mname, n) ->
       let id, name = id + 1, id in
       let id, tail = k id name in
       (id, LetExtn (name, mname, n, ref tail))

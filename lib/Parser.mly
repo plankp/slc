@@ -158,8 +158,8 @@ expr_atom:
       ECons ("::", ref Type.datadef_Void, [hd; tl])) e tl
   }
   | n = UNAME { ECons (n, ref Type.datadef_Void, []) }
-  | e = LNAME { EVar e }
-  | m = UNAME DOT n = LNAME { EModVar (m, n) }
+  | e = LNAME { EVar (None, e) }
+  | m = UNAME DOT n = LNAME { EVar (Some m, n) }
   | e = expr_atom LD { EDeref e }
 
 exprs:
