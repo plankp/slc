@@ -57,3 +57,4 @@ As mentioned earlier, this was only meant to support simple lambda calculus, so 
 *  Pattern matching + pattern-bound (scoped) type variables
 *  Ref cells with relaxed value restriction
 *  Algebraic data types (with existentials but no GADTs)
+*  Module support (with separate compilation but not first class like OCaml)
