@@ -3,3 +3,7 @@ end_of_line = lf
 indent_size = 2
 indent_style = space
 insert_final_newline = true
+
+[*.md]
+end_of_line = lf
+insert_final_newline = true
