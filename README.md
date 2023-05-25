@@ -8,20 +8,36 @@ We went a bit further than simply lambda calculus... Whatever :metal:
 $ dune build slc
 ```
 
-and then you can execute the `slc` program (should be under the `_build/install/default/bin` directory):
+and then you can execute the `slc` program (should be under the `_build/install/default/bin` directory).
+
+For example, you can take the snippet in the [section below](#sample-snippet),
+save it in `Sample.sl` (it really has to be a valid module name followed by `.sl`),
+and feed it to `slc`.
+
+```
+$ slc ./Sample.sl
+```
+
+For more information, use the `--help` flag.
 
 ```
 $ slc --help
 
 slc <options> <files>
   -entry Mark a module as an entry point
-  -Xdump-hir Dump HIR (for debugging purposes)
-  -Xdump-lir Dump LIR (for debugging purposes)
+  -I Include a directory when searching for modules
+  (... more options omitted here ...)
   -help  Display this list of options
   --help  Display this list of options
+  -Xdump-hir Dump HIR (for debugging purposes)
+  -Xdump-lir Dump LIR (for debugging purposes)
 ```
 
-for example, you can take the sample snippet, save it in `Sample.sl`, and feed it to `slc`.
+Alternatively, you can compile-and-run as follows.
+
+```
+$ dune exec slc -- flags-to-slc-go-here
+```
 
 ## Sample snippet
 
