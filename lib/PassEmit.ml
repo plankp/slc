@@ -1,11 +1,16 @@
+(* This (confusingly named) module turns HIR to LIR plus a few things:
+ * -  global names are prefixed as necessary
+ * -  constants are allocated as globals if possible
+ *)
+
 open Hir
 open Lir
 open Printf
 
 module M = Map.Make (Int)
 
-let mangle_globl_name mname n =
-  sprintf "slmod_%s_%s" mname n
+let mangle_globl_name ?(prefix="slmod") mname n =
+  sprintf "%s_%s_%s" prefix mname n
 
 let rec lower_value id prog mname sv sk contk conth = function
   | LetExtn (v, extn, n, e) ->
@@ -18,10 +23,45 @@ let rec lower_value id prog mname sv sk contk conth = function
     lower_value id prog mname (M.add v (Int64 0L) sv) sk contk conth !e
 
   | LetPack (v, elts, e) ->
+    let (constant, elts) = List.fold_left (fun (constant, acc) (flag, e) ->
+      let e = M.find e sv in
+      let constant = match flag, e with
+        | true, _ | _, Local _ -> (* has mutable fields or uses a local *)
+          false
+        | _ -> constant in
+      (constant, e :: acc)) (true, []) elts in
+    let elts = List.rev elts in
+
     let id, t1 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
-    let elts = List.map (fun (_, e) -> M.find e sv) elts in
-    (id, prog, m, IPack (t1, elts) :: instrs, tail)
+    if constant then begin
+      (* allocate it as a global constant *)
+      let name = mangle_globl_name ~prefix:"gval" mname t1 in
+      let prog = Lir.M.add name (Tuple elts) prog in
+      lower_value id prog mname (M.add v (Globl name) sv) sk contk conth !e
+    end else begin
+      (* register the value as a local computation *)
+      let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
+      (id, prog, m, IPack (t1, elts) :: instrs, tail)
+    end
+
+  | LetCons (v, i, elts, e) ->
+    let (constant, elts) = List.fold_left (fun (constant, acc) e ->
+      let e = M.find e sv in
+      let constant = match e with
+        | Local _ -> false
+        | _ -> constant in
+      (constant, e :: acc)) (true, []) elts in
+    let elts = Int64 (Int64.of_int i) :: List.rev elts in
+
+    let id, t1 = Z.succ id, Z.to_string id in
+    if constant then begin
+      let name = mangle_globl_name ~prefix:"gval" mname t1 in
+      let prog = Lir.M.add name (Tuple elts) prog in
+      lower_value id prog mname (M.add v (Globl name) sv) sk contk conth !e
+    end else begin
+      let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
+      (id, prog, m, IPack (t1, elts) :: instrs, tail)
+    end
 
   | LetProj (v, i, t, e) ->
     let id, t1 = Z.succ id, Z.to_string id in
@@ -32,17 +72,12 @@ let rec lower_value id prog mname sv sk contk conth = function
       :: instrs in
     (id, prog, m, instrs, tail)
 
-  | LetCons (v, i, elts, e) ->
-    let id, t1 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
-    let elts = List.map (fun e -> M.find e sv) elts in
-    let elts = Int64 (Int64.of_int i) :: elts in
-    (id, prog, m, IPack (t1, elts) :: instrs, tail)
-
   | Export xs ->
-    let instrs = List.fold_left (fun buf (n, v) ->
+    let (prog, instrs) = List.fold_left (fun (prog, buf) (n, v) ->
       let name = mangle_globl_name mname n in
-      IStore (M.find v sv, Globl name) :: buf) [] xs in
+      match M.find v sv with
+        | Local _ as v -> (prog, IStore (v, Globl name) :: buf)
+        | v -> (Lir.M.add name v prog, buf)) (prog, []) xs in
     (id, prog, Lir.M.empty, instrs, KRetv (Tuple []))
 
   | Mutate (mem, i, elt, k) ->
@@ -97,9 +132,21 @@ let rec lower_value id prog mname sv sk contk conth = function
 
   | LetFun ((f, args, k', h', body), e) ->
     let id, t1 = Z.succ id, Z.to_string id in
-    let (id, name, prog) = lower_function id prog mname t1 args (Some k') (Some h') body in
-    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add f (Globl name) sv) sk contk conth !e in
-    (id, prog, m, instrs, tail)
+    let name = mangle_globl_name mname t1 in
+    let (id, prog) = lower_function id prog mname sv name args (Some k') (Some h') body in
+    lower_value id prog mname (M.add f (Globl name) sv) sk contk conth !e
+
+  | LetRec (bs, e) ->
+    let (id, sv) = List.fold_left (fun (id, sv) (f, _, _, _, _) ->
+      let f' = id |> Z.to_string |> mangle_globl_name mname in
+      (Z.succ id, M.add f (Globl f') sv)) (id, sv) bs in
+
+    let (id, prog) = List.fold_left (fun (id, prog) (f, args, k', h', body) ->
+      let name = match M.find f sv with
+        | Globl n -> n
+        | _ -> failwith "INVALID STATE" in
+      lower_function id prog mname sv name args (Some k') (Some h') body) (id, prog) bs in
+    lower_value id prog mname sv sk contk conth !e
 
   | Case (v, cases) ->
     let id, t1 = Z.succ id, Z.to_string id in
@@ -154,25 +201,29 @@ let rec lower_value id prog mname sv sk contk conth = function
 
   | _ -> failwith "Unsupported lowering"
 
-and lower_function id prog mname f args k h e =
+and lower_function id prog mname sv f args k h e =
   let (id, sv, args) = List.fold_left (fun (id, sv, acc) arg ->
     let id, n = Z.succ id, Z.to_string id in
-    (id, M.add arg (Local n) sv, n :: acc)) (id, M.empty, []) args in
+    (id, M.add arg (Local n) sv, n :: acc)) (id, sv, []) args in
   let (id, prog, m, instrs, tail) = lower_value id prog mname sv M.empty k h !e in
   let m = Lir.M.add "entry" ([], instrs, tail) m in
   let n = Z.to_string id in
   let m = Lir.M.add "exit" ([n], [], KRetv (Local n)) m in
   let m = Lir.M.add "dead" ([], [], KDead) m in
-  let name = mangle_globl_name mname f in
-  (id, name, Lir.M.add name (Label (List.rev args, "entry", m)) prog)
+  (id, Lir.M.add f (Label (List.rev args, "entry", m)) prog)
 
 let lower mname e =
   let _ = PassReindex.reindex e in
   match e with
     | Module (v, h, m) ->
-      let (_, _, prog) = lower_function Z.zero Lir.M.empty mname "INIT" [] None (Some !h) m in
+      (* we start off by assuming all globals are initialized by runtime,
+       * so we assign null slots *)
       let prog = List.fold_left (fun prog v ->
         let name = mangle_globl_name mname v in
-        Lir.M.add name (Int64 0L) prog) prog v in
+        Lir.M.add name (Int64 0L) prog) Lir.M.empty v in
+      (* then we lower the initializer, which will gradually replace constant
+       * globals with the desired initializer *)
+      let name = mangle_globl_name mname "INIT" in
+      let (_, prog) = lower_function Z.zero prog mname M.empty name [] None (Some !h) m in
       prog
     | _ -> failwith "INVALID TERM ANCHOR"

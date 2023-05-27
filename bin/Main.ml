@@ -41,6 +41,7 @@ let transform_program mname prog =
     ; "Simplify", (module PassSimplify)
     ; "Contification", (module PassContify)
     ; "Closure Conversion", (module PassCC)
+    ; "Simplify", (module PassSimplify)
     ] in
 
   if !dump_hir then begin
