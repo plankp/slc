@@ -60,13 +60,13 @@ let alloc_locals ((args, _, blocks) : label) =
       collect_stackargs (offs + 8) (M.add x offs acc) xs in
 
   let collect_locals offs acc blocks =
-    M.fold (fun _ (args, instrs, _) acc ->
+    M.fold (fun _ (args, instrs) acc ->
       let acc = List.fold_left (fun (acc, offs) arg ->
         (M.add arg offs acc, offs - 8)) acc args in
-      let acc = List.fold_left (fun (acc, offs) -> function
-        | ICall (n, _, _) | IOffs (n, _, _) | IPack (n, _) | ILoad (n, _) ->
-          (M.add n offs acc, offs - 8)
-        | IStore _ -> (acc, offs)) acc instrs in
+      let acc = Cnode.fold_left (fun (acc, offs) n ->
+        match get_dst_name n.info with
+          | Some n -> (M.add n offs acc, offs - 8)
+          | None -> (acc, offs)) acc instrs in
       acc) blocks (acc, offs) in
 
   (* offsets assume rbp relative indices (of course rbp saved) *)
@@ -101,9 +101,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
       fprintf chan "    movq $0x%Lu, %s  # double %e\n" (Int64.bits_of_float v) reg v
     | _ -> failwith "VALUE IS NOT SIMPLE" in
 
-  let map_block n ((_, instrs, tail) : block) =
-    fprintf chan ".L%s_%s:\n" prefix n;
-
+  let map_block n ((_, instrs) : block) =
     let map_usual_call f args =
       let rec load_regargs names slots = match names, slots with
         | arg :: xs, reg :: ys ->
@@ -127,7 +125,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
       (* call has returned, so cleanup the stack *)
       fprintf chan "    addq $%d, %%rsp\n" (8 * List.length stackargs) in
 
-    List.iter (function
+    let map_instr = function
       | ICall (dst, f, args) ->
         map_usual_call f args;
         (* manually unwind on exception *)
@@ -166,9 +164,8 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
         List.iteri (fun i e ->
           load_simple_value "%rdx" e;
           fprintf chan "    movq %%rdx, %d(%%rax)\n" (8 * i)) elts;
-        fprintf chan "    movq %%rax, %d(%%rbp)\n" (M.find dst m)) instrs;
+        fprintf chan "    movq %%rax, %d(%%rbp)\n" (M.find dst m)
 
-    match tail with
       | KDead ->
         fprintf chan "    # (unreachable)\n"
 
@@ -196,8 +193,8 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
         map_usual_call f args;
 
         (* jump to the corresponding contination depending on edx *)
-        let (kparam, _, _) = M.find k blocks in
-        let (hparam, _, _) = M.find h blocks in
+        let (kparam, _) = M.find k blocks in
+        let (hparam, _) = M.find h blocks in
         fprintf chan "    testq %%edx, %%edx\n";
         fprintf chan "    jnz 0f\n";
         fprintf chan "    movq %%rax, %d(%%rbp)\n" (M.find (List.hd kparam) m);
@@ -209,7 +206,7 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
         (* make a simplification and say that every local phi move might
          * overwrite the value (which is definitely not true) and use the
          * stack for those cases. *)
-        let (params, _, _) = M.find k blocks in
+        let (params, _) = M.find k blocks in
         let easy, diff = List.fold_left2 (fun (easy, diff) p a ->
           match a, p with
             | Local a, b when a = b -> (easy, diff)
@@ -309,6 +306,9 @@ let map_module_label chan prefix (((args, entry, blocks) as lbl) : label) =
             load_simple_value "%rax" f;
             fprintf chan "    jmpq *%%rax\n"
       end in
+
+    fprintf chan ".L%s_%s:\n" prefix n;
+    Cnode.iter (fun n -> map_instr n.info) instrs in
 
   let (m1, b1, m2) = M.split entry blocks in
   map_block entry (Option.get b1);

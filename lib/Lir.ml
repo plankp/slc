@@ -12,7 +12,7 @@ and value =
 
 and label = string list * string * block M.t
 
-and block = string list * instr list * tail
+and block = string list * instr Cnode.t
 
 and instr =
   | ICall of string * value * value list
@@ -20,8 +20,6 @@ and instr =
   | IPack of string * value list
   | ILoad of string * value
   | IStore of value * value
-
-and tail =
   | KDead
   | KRetv of value
   | KJump of string * value list
@@ -29,6 +27,13 @@ and tail =
   | KCase of value * string * (int64 * string) list
   | KCatch of value * string * string * value list
   | KThrow of value
+
+let get_dst_name = function
+  | ICall (n, _, _) | IOffs (n, _, _) | IPack (n, _) | ILoad (n, _) ->
+    Some n
+  | IStore _
+  | KDead | KRetv _ | KJump _ | KCall _ | KCase _ | KCatch _ | KThrow _ ->
+    None
 
 let rec dump (p : prog) =
   M.iter (fun k v ->
@@ -60,7 +65,7 @@ and dump_label (args, entry, blocks) =
   M.iter (fun k v -> dump_block k v; Printf.printf "\n") blocks;
   Printf.printf "}"
 
-and dump_block n (args, instrs, tail) =
+and dump_block n (args, instrs) =
   Printf.printf ".%s" n;
   let () = match args with
     | [] -> ()
@@ -68,39 +73,8 @@ and dump_block n (args, instrs, tail) =
       Printf.printf "($%s" x;
       List.iter (fun v -> Printf.printf ", $%s" v) xs;
       Printf.printf ")" in
-  Printf.printf ":\n";
-  List.iter (fun v -> dump_instr v; Printf.printf "\n") instrs;
-  match tail with
-    | KDead ->
-      Printf.printf "  unreachable";
-    | KRetv v ->
-      Printf.printf "  ret "; dump_value v
-    | KJump (l, []) ->
-      Printf.printf "  jmp .%s" l
-    | KJump (l, args) ->
-      Printf.printf "  jmp .%s(" l;
-      dump_csv args;
-      Printf.printf ")"
-    | KCall (v, args) ->
-      Printf.printf "  tailcall ";
-      dump_value v;
-      Printf.printf "(";
-      dump_csv args;
-      Printf.printf ")"
-    | KCase (v, k, s) ->
-      Printf.printf "  switch ";
-      dump_value v;
-      Printf.printf ", _ .%s" k;
-      List.iter (fun (v, k) -> Printf.printf ", %Lu .%s" v k) s
-    | KCatch (f, k, h, args) ->
-      Printf.printf "  catchcall ";
-      dump_value f;
-      Printf.printf " .%s, .%s (" k h;
-      dump_csv args;
-      Printf.printf ")"
-    | KThrow x ->
-      Printf.printf "  throw ";
-      dump_value x
+  Printf.printf ":";
+  Cnode.iter (fun v -> Printf.printf "\n"; dump_instr v.info) instrs
 
 and dump_instr = function
   | ICall (d, f, args) ->
@@ -124,6 +98,36 @@ and dump_instr = function
     dump_value m;
     Printf.printf " = ";
     dump_value v
+  | KDead ->
+    Printf.printf "  unreachable";
+  | KRetv v ->
+    Printf.printf "  ret "; dump_value v
+  | KJump (l, []) ->
+    Printf.printf "  jmp .%s" l
+  | KJump (l, args) ->
+    Printf.printf "  jmp .%s(" l;
+    dump_csv args;
+    Printf.printf ")"
+  | KCall (v, args) ->
+    Printf.printf "  tailcall ";
+    dump_value v;
+    Printf.printf "(";
+    dump_csv args;
+    Printf.printf ")"
+  | KCase (v, k, s) ->
+    Printf.printf "  switch ";
+    dump_value v;
+    Printf.printf ", _ .%s" k;
+    List.iter (fun (v, k) -> Printf.printf ", %Lu .%s" v k) s
+  | KCatch (f, k, h, args) ->
+    Printf.printf "  catchcall ";
+    dump_value f;
+    Printf.printf " .%s, .%s (" k h;
+    dump_csv args;
+    Printf.printf ")"
+  | KThrow x ->
+    Printf.printf "  throw ";
+    dump_value x
 
 and dump_csv = function
   | [] -> ()

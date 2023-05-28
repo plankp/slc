@@ -12,15 +12,15 @@ module M = Map.Make (Int)
 let mangle_globl_name ?(prefix="slmod") mname n =
   sprintf "%s_%s_%s" prefix mname n
 
-let rec lower_value id prog mname sv sk contk conth = function
+let rec lower_value id prog mname sv sk contk conth instrs = function
   | LetExtn (v, extn, n, e) ->
     let id, t1 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
     let name = mangle_globl_name extn n in
-    (id, prog, m, ILoad (t1, Globl name) :: instrs, tail)
+    Cnode.add_before instrs [ILoad (t1, Globl name)];
+    lower_value id prog mname (M.add v (Local t1) sv) sk contk conth instrs !e
 
   | LetPack (v, [], e) ->
-    lower_value id prog mname (M.add v (Int64 0L) sv) sk contk conth !e
+    lower_value id prog mname (M.add v (Int64 0L) sv) sk contk conth instrs !e
 
   | LetPack (v, elts, e) ->
     let (constant, elts) = List.fold_left (fun (constant, acc) (flag, e) ->
@@ -37,11 +37,11 @@ let rec lower_value id prog mname sv sk contk conth = function
       (* allocate it as a global constant *)
       let name = mangle_globl_name ~prefix:"gval" mname t1 in
       let prog = Lir.M.add name (Tuple elts) prog in
-      lower_value id prog mname (M.add v (Globl name) sv) sk contk conth !e
+      lower_value id prog mname (M.add v (Globl name) sv) sk contk conth instrs !e
     end else begin
       (* register the value as a local computation *)
-      let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
-      (id, prog, m, IPack (t1, elts) :: instrs, tail)
+      Cnode.add_before instrs [IPack (t1, elts)];
+      lower_value id prog mname (M.add v (Local t1) sv) sk contk conth instrs !e
     end
 
   | LetCons (v, i, elts, e) ->
@@ -57,84 +57,100 @@ let rec lower_value id prog mname sv sk contk conth = function
     if constant then begin
       let name = mangle_globl_name ~prefix:"gval" mname t1 in
       let prog = Lir.M.add name (Tuple elts) prog in
-      lower_value id prog mname (M.add v (Globl name) sv) sk contk conth !e
+      lower_value id prog mname (M.add v (Globl name) sv) sk contk conth instrs !e
     end else begin
-      let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t1) sv) sk contk conth !e in
-      (id, prog, m, IPack (t1, elts) :: instrs, tail)
+      Cnode.add_before instrs [IPack (t1, elts)];
+      lower_value id prog mname (M.add v (Local t1) sv) sk contk conth instrs !e
     end
 
   | LetProj (v, i, t, e) ->
     let id, t1 = Z.succ id, Z.to_string id in
     let id, t2 = Z.succ id, Z.to_string id in
-    let (id, prog, m, instrs, tail) = lower_value id prog mname (M.add v (Local t2) sv) sk contk conth !e in
-    let instrs = IOffs (t1, M.find t sv, Int64.of_int i)
-      :: ILoad (t2, Local (t1))
-      :: instrs in
-    (id, prog, m, instrs, tail)
+      Cnode.add_before instrs
+        [ IOffs (t1, M.find t sv, Int64.of_int i)
+        ; ILoad (t2, Local (t1))
+        ];
+      lower_value id prog mname (M.add v (Local t2) sv) sk contk conth instrs !e
 
   | Export xs ->
-    let (prog, instrs) = List.fold_left (fun (prog, buf) (n, v) ->
+    let prog = List.fold_left (fun prog (n, v) ->
       let name = mangle_globl_name mname n in
       match M.find v sv with
-        | Local _ as v -> (prog, IStore (v, Globl name) :: buf)
-        | v -> (Lir.M.add name v prog, buf)) (prog, []) xs in
-    (id, prog, Lir.M.empty, instrs, KRetv (Tuple []))
+        | Local _ as v ->
+          Cnode.add_before instrs [IStore (v, Globl name)];
+          prog
+        | v -> Lir.M.add name v prog) prog xs in
+    Cnode.add_before instrs [KRetv (Tuple [])];
+    (id, prog, Lir.M.empty)
 
   | Mutate (mem, i, elt, k) ->
     let id, t1 = Z.succ id, Z.to_string id in
-    let instrs =
+    Cnode.add_before instrs
       [ IOffs (t1, M.find mem sv, Int64.of_int i)
       ; IStore (M.find elt sv, Local t1)
-      ] in
-    (id, prog, Lir.M.empty, instrs, KJump (string_of_int k, []))
+      ; KJump (string_of_int k, [])
+      ];
+    (id, prog, Lir.M.empty)
 
   | Jmp (j, [v]) when Some j = contk ->
-    (id, prog, Lir.M.empty, [], KRetv (M.find v sv))
+    Cnode.add_before instrs [KRetv (M.find v sv)];
+    (id, prog, Lir.M.empty)
 
   | Jmp (j, [v]) when Some j = conth ->
-    (id, prog, Lir.M.empty, [], KRetv (M.find v sv))
+    Cnode.add_before instrs [KThrow (M.find v sv)];
+    (id, prog, Lir.M.empty)
 
   | Jmp (j, args) ->
     let args = List.map (fun v -> M.find v sv) args in
-    (id, prog, Lir.M.empty, [], KJump (string_of_int j, args))
+    Cnode.add_before instrs [KJump (string_of_int j, args)];
+    (id, prog, Lir.M.empty)
 
   | App (f, args, k, h) when Some k = contk && Some h = conth ->
     let args = List.map (fun v -> M.find v sv) args in
-    (id, prog, Lir.M.empty, [], KCall (M.find f sv, args))
+    Cnode.add_before instrs [KCall (M.find f sv, args)];
+    (id, prog, Lir.M.empty)
 
   | App (f, args, k, h) when Some h = conth ->
     let id, t1 = Z.succ id, Z.to_string id in
     let args = List.map (fun v -> M.find v sv) args in
-    let instrs = [ICall (t1, M.find f sv, args)] in
-    (id, prog, Lir.M.empty, instrs, KJump (string_of_int k, [Local t1]))
+    Cnode.add_before instrs
+      [ ICall (t1, M.find f sv, args)
+      ; KJump (string_of_int k, [Local t1])
+      ];
+    (id, prog, Lir.M.empty)
 
   | App (f, args, k, h) ->
     let args = List.map (fun v -> M.find v sv) args in
     let k = if Some k = contk then "exit" else string_of_int k in
     let h = string_of_int h in
-    (id, prog, Lir.M.empty, [], KCatch (M.find f sv, k, h, args))
+    Cnode.add_before instrs [KCatch (M.find f sv, k, h, args)];
+    (id, prog, Lir.M.empty)
 
   | LetCont (bs, e) ->
     let sk = List.fold_left (fun sk (k, args, _) ->
       M.add k (List.length args) sk) sk bs in
 
-    let (id, prog, m, instrs, tail) = lower_value id prog mname sv sk contk conth !e in
+    let (id, prog, m) = lower_value id prog mname sv sk contk conth instrs !e in
     let (id, prog, m) = List.fold_left (fun (id, prog, m) (k, args, e) ->
       let k = string_of_int k in
       let (id, sv, args) = List.fold_left (fun (id, sv, acc) arg ->
         let id, n = Z.succ id, Z.to_string id in
         (id, M.add arg (Local n) sv, n :: acc)) (id, sv, []) args in
-      let (id, prog, m', instrs, tail) = lower_value id prog mname sv sk contk conth !e in
-      let block = (List.rev args, instrs, tail) in
+      let instrs = Cnode.new_node KDead in
+      let (id, prog, m') = lower_value id prog mname sv sk contk conth instrs !e in
+      let instrs =
+        let next = instrs.next in
+        Cnode.unlink instrs;
+        next in
       let m = Lir.M.fold Lir.M.add m' m in
-      (id, prog, Lir.M.add k block m)) (id, prog, m) bs in
-    (id, prog, m, instrs, tail)
+      (id, prog, Lir.M.add k (List.rev args, instrs) m)) (id, prog, m) bs in
+    (id, prog, m)
 
   | LetFun ((f, args, k', h', body), e) ->
     let id, t1 = Z.succ id, Z.to_string id in
     let name = mangle_globl_name mname t1 in
     let (id, prog) = lower_function id prog mname sv name args (Some k') (Some h') body in
-    lower_value id prog mname (M.add f (Globl name) sv) sk contk conth !e
+    lower_value id prog mname (M.add f (Globl name) sv) sk contk conth instrs !e
 
   | LetRec (bs, e) ->
     let (id, sv) = List.fold_left (fun (id, sv) (f, _, _, _, _) ->
@@ -146,16 +162,12 @@ let rec lower_value id prog mname sv sk contk conth = function
         | Globl n -> n
         | _ -> failwith "INVALID STATE" in
       lower_function id prog mname sv name args (Some k') (Some h') body) (id, prog) bs in
-    lower_value id prog mname sv sk contk conth !e
+    lower_value id prog mname sv sk contk conth instrs !e
 
   | Case (v, cases) ->
     let id, t1 = Z.succ id, Z.to_string id in
     let id, t2 = Z.succ id, Z.to_string id in
     let scrutinee = M.find v sv in
-    let instrs =
-      [ IOffs (t1, scrutinee, Int64.zero)
-      ; ILoad (t2, Local t1)
-      ] in
 
     (* synthesize the intermediate blocks for unpacking fields *)
     let tmp = id in
@@ -164,40 +176,57 @@ let rec lower_value id prog mname sv sk contk conth = function
         | None -> (id, m, tbl)  (* ignore default case for now *)
         | Some k ->
           let j = Printf.sprintf "case%a.%u" Z.sprint tmp k in
-          let (id, block) =
+          let instrs = Cnode.new_node KDead in
+          let id =
             if Some v = contk then begin
               let id, t1 = Z.succ id, Z.to_string id in
               let id, t2 = Z.succ id, Z.to_string id in
-              (id, ([], [ IOffs (t1, scrutinee, Int64.one)
-                        ; ILoad (t2, Local t1)
-                        ], KRetv (Local t2)))
+              Cnode.add_before instrs
+                [ IOffs (t1, scrutinee, Int64.one)
+                ; ILoad (t2, Local t1)
+                ; KRetv (Local t2)
+                ];
+              id
             end else if Some v = conth then begin
               let id, t1 = Z.succ id, Z.to_string id in
               let id, t2 = Z.succ id, Z.to_string id in
-              (id, ([], [ IOffs (t1, scrutinee, Int64.one)
-                        ; ILoad (t2, Local t1)
-                        ], KThrow (Local t2)))
+              Cnode.add_before instrs
+                [ IOffs (t1, scrutinee, Int64.one)
+                ; ILoad (t2, Local t1)
+                ; KThrow (Local t2)
+                ];
+              id
             end else begin
-              let rec loop id offs instrs args arity =
-                if arity = 0 then
-                  (id, ([], instrs, KJump (string_of_int v, List.rev args)))
-                else
+              let rec loop id offs args arity =
+                if arity = 0 then begin
+                  Cnode.add_before instrs [KJump (string_of_int v, List.rev args)];
+                  id
+                end else
                   let id, t1 = Z.succ id, Z.to_string id in
                   let id, t2 = Z.succ id, Z.to_string id in
-                  let instrs = IOffs (t1, scrutinee, offs)
-                    :: ILoad (t2, Local t1)
-                    :: instrs in
-                  let args = Local t2 :: args in
-                  loop id (Int64.succ offs) instrs args (arity - 1) in
-              loop id Int64.one [] [] (M.find v sk)
+                  Cnode.add_before instrs
+                    [ IOffs (t1, scrutinee, offs)
+                    ; ILoad (t2, Local t1)
+                    ];
+                  loop id (Int64.succ offs) (Local t2 :: args) (arity - 1) in
+              loop id Int64.one [] (M.find v sk)
             end in
-          (id, Lir.M.add j block m, (Int64.of_int k, j) :: tbl)
+          let instrs =
+            let next = instrs.next in
+            Cnode.unlink instrs;
+            next in
+          (id, Lir.M.add j ([], instrs) m, (Int64.of_int k, j) :: tbl)
       ) cases (id, Lir.M.empty, []) in
 
     let default_case = match Hir.M.find_opt None cases with
       | None -> "dead"
       | Some k -> string_of_int k in
-    (id, prog, m, instrs, KCase (Local t2, default_case, tbl))
+    Cnode.add_before instrs
+      [ IOffs (t1, scrutinee, Int64.zero)
+      ; ILoad (t2, Local t1)
+      ; KCase (Local t2, default_case, tbl)
+      ];
+    (id, prog, m)
 
   | _ -> failwith "Unsupported lowering"
 
@@ -205,11 +234,20 @@ and lower_function id prog mname sv f args k h e =
   let (id, sv, args) = List.fold_left (fun (id, sv, acc) arg ->
     let id, n = Z.succ id, Z.to_string id in
     (id, M.add arg (Local n) sv, n :: acc)) (id, sv, []) args in
-  let (id, prog, m, instrs, tail) = lower_value id prog mname sv M.empty k h !e in
-  let m = Lir.M.add "entry" ([], instrs, tail) m in
+
+  let instrs = Cnode.new_node KDead in
+  let (id, prog, m) = lower_value id prog mname sv M.empty k h instrs !e in
+
+  (* at this point, we have KDead followed by the real instructions.
+   * we drop the dummy KDead node *)
+  let instrs =
+    let next = instrs.next in
+    Cnode.unlink instrs;
+    next in
+  let m = Lir.M.add "entry" ([], instrs) m in
   let n = Z.to_string id in
-  let m = Lir.M.add "exit" ([n], [], KRetv (Local n)) m in
-  let m = Lir.M.add "dead" ([], [], KDead) m in
+  let m = Lir.M.add "exit" ([n], Cnode.new_node (KRetv (Local n))) m in
+  let m = Lir.M.add "dead" ([], Cnode.new_node KDead) m in
   (id, Lir.M.add f (Label (List.rev args, "entry", m)) prog)
 
 let lower mname e =
