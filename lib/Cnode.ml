@@ -37,13 +37,13 @@ let unlink node =
   next.prev <- prev
 
 let add_after self values =
-  let rec loop = function
+  let rec loop ptr = function
     | [] -> ()
     | x :: xs ->
       let node = new_node x in
-      link_after node self;
-      loop xs in
-  loop values
+      link_after node ptr;
+      loop node xs in
+  loop self.prev values
 
 let add_before self values =
   let rec loop = function
@@ -75,6 +75,13 @@ let iter f node =
   let rec loop node =
     let () = f node in
     if node != last then loop node.next in
+  loop node
+
+let rev_iter f node =
+  let first = node in
+  let rec loop node =
+    let () = f node in
+    if node != first then loop node.prev in
   loop node
 
 let fold_left f acc node =
